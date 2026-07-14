@@ -26,6 +26,7 @@ See `changelogs/v1.5.0-beta.1.md` for the full themed summary with credits.
 - **core**: always emit absolute paths from `SaveFilesToDisk` / `AppendFileRefs` — fixes relative `work_dir` attachments silently dropped by agent (#1462 fixing #1459, @chenhg5).
 - **core**: create queue placeholder before session lock — prevents concurrent message queue miss (#1389, @xxb).
 - **codex**: time out blocked app-server writes (#1448, @AaronZ345).
+- **codex**: surface GPT-5.x and future chat-model families from API model discovery instead of filtering them through a stale static allowlist (#1546, @cg33).
 - **slack**: suppress `NO_REPLY` marker on streaming-card silent replies (#1397, @spinsirr).
 
 ## v1.4.1 (2026-06-28)
