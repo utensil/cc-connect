@@ -189,6 +189,35 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestConfigValidateQueueBusyBehavior(t *testing.T) {
+	tests := []struct {
+		name     string
+		behavior string
+		wantErr  bool
+	}{
+		{name: "empty defaults to queue"},
+		{name: "queue", behavior: "queue"},
+		{name: "steer", behavior: "steer"},
+		{name: "case insensitive and trimmed", behavior: "  StEeR  "},
+		{name: "invalid", behavior: "drop", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Queue:    QueueConfig{BusyBehavior: tt.behavior},
+				Projects: []ProjectConfig{validProject("demo")},
+			}
+			err := cfg.validate()
+			if tt.wantErr {
+				assertErrContains(t, err, `queue.busy_behavior must be "queue" or "steer"`)
+			} else if err != nil {
+				t.Fatalf("validate() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
 	dangerous := []string{"PATH", "path", "LD_PRELOAD", "HOME", "USER", "SHELL", "SUDO_USER", "SUDO_COMMAND", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"}
 	for _, v := range dangerous {
