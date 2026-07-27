@@ -393,6 +393,7 @@ type Engine struct {
 	agentSessionIdleTimeoutNanos atomic.Int64
 	agentSessionIdleSeq          atomic.Uint64
 	maxQueuedMessages            int
+	busyMessageBehavior          string
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
@@ -734,6 +735,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		busyMessageBehavior:   "queue",
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
 		shell:                 defaultShell(),
@@ -1315,6 +1317,17 @@ func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 func (e *Engine) SetMaxQueuedMessages(n int) {
 	if n > 0 {
 		e.maxQueuedMessages = n
+	}
+}
+
+// SetBusyMessageBehavior controls whether plain-text messages arriving during
+// an active turn are queued or steered into that turn.
+func (e *Engine) SetBusyMessageBehavior(behavior string) {
+	switch strings.ToLower(strings.TrimSpace(behavior)) {
+	case "steer":
+		e.busyMessageBehavior = "steer"
+	default:
+		e.busyMessageBehavior = "queue"
 	}
 }
 
@@ -2966,6 +2979,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				goto sessionLocked
 			}
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+			return
+		}
+		if e.busyMessageBehavior == "steer" &&
+			len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil &&
+			e.steerBusyMessage(p, msg, interactiveKey) {
 			return
 		}
 		// Session is busy — try to queue the message for the running turn
@@ -10093,20 +10111,52 @@ func (e *Engine) cmdSteer(p Platform, msg *Message, args []string) bool {
 		return true
 	}
 
+	prompt := e.buildSenderPrompt(text, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	e.sendSteer(p, msg, agentSession, prompt)
+	return true
+}
+
+// steerBusyMessage attempts to steer a plain-text follow-up into the active
+// turn. It returns false only while the agent session is still starting, so the
+// caller can preserve the existing startup queue behavior.
+func (e *Engine) steerBusyMessage(p Platform, msg *Message, interactiveKey string) bool {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil {
+		return false
+	}
+	if !agentSession.Alive() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+		return true
+	}
+
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	e.sendSteer(p, msg, agentSession, prompt)
+	return true
+}
+
+func (e *Engine) sendSteer(p Platform, msg *Message, agentSession AgentSession, prompt string) {
 	steerer, ok := agentSession.(SessionSteerer)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerNotSupported))
-		return true
+		return
 	}
 
-	if err := steerer.Steer(text); err != nil {
+	if err := steerer.Steer(prompt); err != nil {
 		slog.Error("steer: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerSendFailed))
-		return true
+		return
 	}
 
 	e.acknowledgeOrReply(p, msg, MessageAckSteered, MsgSteerSent)
-	return true
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {

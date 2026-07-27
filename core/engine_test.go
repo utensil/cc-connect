@@ -71,10 +71,12 @@ type stubAcknowledgingPlatform struct {
 	stubPlatformEngine
 	handled bool
 	acks    []MessageAckKind
+	ackCtxs []any
 }
 
-func (p *stubAcknowledgingPlatform) AcknowledgeMessage(_ any, kind MessageAckKind) bool {
+func (p *stubAcknowledgingPlatform) AcknowledgeMessage(replyCtx any, kind MessageAckKind) bool {
 	p.acks = append(p.acks, kind)
+	p.ackCtxs = append(p.ackCtxs, replyCtx)
 	return p.handled
 }
 
@@ -11029,6 +11031,212 @@ func TestCmdSteer_AcknowledgementFailureFallsBackToText(t *testing.T) {
 	}
 	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgSteerSent)) {
 		t.Fatalf("text replies = %#v, want fallback acknowledgement", sent)
+	}
+}
+
+func TestHandleMessage_BusyBehaviorDefaultsToQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("failed to mark session busy")
+	}
+	defer session.Unlock()
+
+	state := &interactiveState{agentSession: &steerSession{}}
+	e.interactiveStates[key] = state
+	e.handleMessage(p, &Message{SessionKey: key, Content: "next", ReplyCtx: "ctx"})
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 || state.pendingMessages[0].content != "next" {
+		t.Fatalf("pending messages = %#v, want queued follow-up", state.pendingMessages)
+	}
+	if got := state.agentSession.(*steerSession).lastPrompt; got != "" {
+		t.Fatalf("steer prompt = %q, want no steer in default queue mode", got)
+	}
+}
+
+func TestHandleMessage_BusyBehaviorSteerUsesMergedContentAndSender(t *testing.T) {
+	p := &stubAcknowledgingPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"},
+		handled:            true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageBehavior("  StEeR ")
+	e.SetInjectSender(true)
+	key := "test:channel:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("failed to mark session busy")
+	}
+	defer session.Unlock()
+
+	steerer := &steerSession{}
+	state := &interactiveState{agentSession: steerer}
+	e.interactiveStates[key] = state
+	replyCtx := &struct{ id string }{"original"}
+	e.handleMessage(p, &Message{
+		SessionKey:   key,
+		Platform:     "test",
+		UserID:       "user1",
+		UserName:     "Alice",
+		Content:      "new guidance",
+		ExtraContent: "[replying to Peri: prior result]",
+		ReplyCtx:     replyCtx,
+	})
+
+	want := "[cc-connect sender_id=user1 sender_name=\"Alice\" platform=test chat_id=channel]\n" +
+		"[replying to Peri: prior result]\nnew guidance"
+	if steerer.lastPrompt != want {
+		t.Fatalf("steer prompt = %q, want %q", steerer.lastPrompt, want)
+	}
+	state.mu.Lock()
+	queued := len(state.pendingMessages)
+	state.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("pending messages = %d, want none after steer", queued)
+	}
+	if len(p.acks) != 1 || p.acks[0] != MessageAckSteered {
+		t.Fatalf("acknowledgements = %#v, want steer reaction", p.acks)
+	}
+	if len(p.ackCtxs) != 1 || p.ackCtxs[0] != replyCtx {
+		t.Fatalf("ack contexts = %#v, want original ReplyCtx", p.ackCtxs)
+	}
+}
+
+func TestHandleMessage_BusyBehaviorSteerQueuesNonTextAndStartup(t *testing.T) {
+	tests := []struct {
+		name         string
+		agentSession AgentSession
+		images       []ImageAttachment
+		files        []FileAttachment
+	}{
+		{name: "image", agentSession: &steerSession{}, images: []ImageAttachment{{}}},
+		{name: "file", agentSession: &steerSession{}, files: []FileAttachment{{}}},
+		{name: "startup", agentSession: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetBusyMessageBehavior("steer")
+			key := "test:user1"
+			session := e.sessions.GetOrCreateActive(key)
+			if !session.TryLock() {
+				t.Fatal("failed to mark session busy")
+			}
+			defer session.Unlock()
+
+			state := &interactiveState{agentSession: tt.agentSession}
+			e.interactiveStates[key] = state
+			e.handleMessage(p, &Message{
+				SessionKey: key,
+				Content:    "next",
+				Images:     tt.images,
+				Files:      tt.files,
+				ReplyCtx:   "ctx",
+			})
+
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if len(state.pendingMessages) != 1 {
+				t.Fatalf("pending messages = %d, want one", len(state.pendingMessages))
+			}
+		})
+	}
+}
+
+func TestHandleMessage_BusyBehaviorSteerFailuresDoNotQueue(t *testing.T) {
+	tests := []struct {
+		name      string
+		session   AgentSession
+		wantReply MsgKey
+	}{
+		{name: "unsupported", session: &stubAgentSession{}, wantReply: MsgSteerNotSupported},
+		{name: "send error", session: &steerSession{err: errors.New("boom")}, wantReply: MsgSteerSendFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetBusyMessageBehavior("steer")
+			key := "test:user1"
+			session := e.sessions.GetOrCreateActive(key)
+			if !session.TryLock() {
+				t.Fatal("failed to mark session busy")
+			}
+			defer session.Unlock()
+
+			state := &interactiveState{agentSession: tt.session}
+			e.interactiveStates[key] = state
+			e.handleMessage(p, &Message{SessionKey: key, Content: "next", ReplyCtx: "ctx"})
+
+			state.mu.Lock()
+			queued := len(state.pendingMessages)
+			state.mu.Unlock()
+			if queued != 0 {
+				t.Fatalf("pending messages = %d, want none", queued)
+			}
+			sent := p.getSent()
+			if len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(tt.wantReply)) {
+				t.Fatalf("sent = %#v, want %q", sent, e.i18n.T(tt.wantReply))
+			}
+		})
+	}
+}
+
+func TestHandleMessage_BusyBehaviorSteerTextAckFallback(t *testing.T) {
+	p := &stubAcknowledgingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageBehavior("steer")
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("failed to mark session busy")
+	}
+	defer session.Unlock()
+	e.interactiveStates[key] = &interactiveState{agentSession: &steerSession{}}
+
+	e.handleMessage(p, &Message{SessionKey: key, Content: "next", ReplyCtx: "ctx"})
+
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgSteerSent)) {
+		t.Fatalf("text replies = %#v, want steer acknowledgement fallback", sent)
+	}
+}
+
+func TestCmdSteer_InjectSenderExcludesExtraContent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetInjectSender(true)
+	key := "test:channel:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("failed to mark session busy")
+	}
+	defer session.Unlock()
+
+	steerer := &steerSession{}
+	e.interactiveStates[key] = &interactiveState{agentSession: steerer}
+	msg := &Message{
+		SessionKey:   key,
+		Platform:     "test",
+		UserID:       "user1",
+		UserName:     "Alice",
+		Content:      "/steer focus",
+		ExtraContent: "[replying to Peri: prior result]",
+		ReplyCtx:     "ctx",
+	}
+	if !e.cmdSteer(p, msg, []string{"focus"}) {
+		t.Fatal("busy steer should be handled")
+	}
+
+	want := "[cc-connect sender_id=user1 sender_name=\"Alice\" platform=test chat_id=channel]\nfocus"
+	if steerer.lastPrompt != want {
+		t.Fatalf("steer prompt = %q, want %q", steerer.lastPrompt, want)
 	}
 }
 
