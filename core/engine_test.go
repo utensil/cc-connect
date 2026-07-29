@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -10816,6 +10817,29 @@ func TestExecuteCardAction_UnknownCommand_NoPanic(t *testing.T) {
 	e.executeCardAction("", "", "test:user1")
 }
 
+func TestSplitCommandArgs_AllWhitespaceSeparatesArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "space", raw: "/steer focus now", want: []string{"/steer", "focus", "now"}},
+		{name: "tab", raw: "/steer\tfocus", want: []string{"/steer", "focus"}},
+		{name: "line feed", raw: "/steer\nfocus", want: []string{"/steer", "focus"}},
+		{name: "CRLF", raw: "/steer\r\nfocus", want: []string{"/steer", "focus"}},
+		{name: "Unicode no-break space", raw: "/steer\u00a0focus", want: []string{"/steer", "focus"}},
+		{name: "quoted whitespace preserved", raw: "/steer \"focus\nnow\"", want: []string{"/steer", "focus\nnow"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := splitCommandArgs(tt.raw); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("splitCommandArgs(%q) = %#v, want %#v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- 4. Multi-workspace command handlers use interactiveKey ---
 
 func TestCmdStatus_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
@@ -10881,6 +10905,35 @@ func TestCmdSteer_IdleFallsBackToNormalMessage(t *testing.T) {
 	}
 	if sent := p.getSent(); len(sent) != 0 {
 		t.Fatalf("unexpected replies for idle fallback: %#v", sent)
+	}
+}
+
+func TestCmdSteer_NewlineBeforeContentSteersBusySession(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("failed to mark session busy")
+	}
+	defer session.Unlock()
+
+	steerer := &steerSession{}
+	e.interactiveStates[key] = &interactiveState{agentSession: steerer}
+	e.handleMessage(p, &Message{
+		SessionKey: key,
+		Content:    "/steer\nfocus on failing tests",
+		ReplyCtx:   "ctx",
+	})
+
+	if got, want := steerer.lastPrompt, "focus on failing tests"; got != want {
+		t.Fatalf("steer prompt = %q, want %q", got, want)
+	}
+	e.interactiveMu.Lock()
+	queued := len(e.interactiveStates[key].pendingMessages)
+	e.interactiveMu.Unlock()
+	if queued != 0 {
+		t.Fatalf("pending messages = %d, want none after newline /steer", queued)
 	}
 }
 
