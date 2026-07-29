@@ -6417,20 +6417,19 @@ func splitCommandArgs(s string) []string {
 	var cur strings.Builder
 	inSingle := false
 	inDouble := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for _, c := range s {
 		switch {
 		case c == '\'' && !inDouble:
 			inSingle = !inSingle
 		case c == '"' && !inSingle:
 			inDouble = !inDouble
-		case (c == ' ' || c == '\t') && !inSingle && !inDouble:
+		case unicode.IsSpace(c) && !inSingle && !inDouble:
 			if cur.Len() > 0 {
 				tokens = append(tokens, cur.String())
 				cur.Reset()
 			}
 		default:
-			cur.WriteByte(c)
+			cur.WriteRune(c)
 		}
 	}
 	if cur.Len() > 0 {
