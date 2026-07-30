@@ -513,6 +513,24 @@ type stubLiveReasoningSession struct {
 	efforts []string
 }
 
+type blockingAliveReasoningSession struct {
+	stubAgentSession
+	aliveEntered chan struct{}
+	releaseAlive chan struct{}
+	effortSet    chan string
+}
+
+func (s *blockingAliveReasoningSession) Alive() bool {
+	close(s.aliveEntered)
+	<-s.releaseAlive
+	return true
+}
+
+func (s *blockingAliveReasoningSession) SetLiveReasoningEffort(effort string) bool {
+	s.effortSet <- effort
+	return true
+}
+
 type stubPreservingReasoningAgent struct {
 	stubModelModeAgent
 }
@@ -5707,6 +5725,52 @@ func TestCmdReasoning_PreservesIdleResumableSession(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "current conversation was preserved") {
 		t.Fatalf("sent = %v, want preserved-conversation confirmation", p.sent)
+	}
+}
+
+func TestApplyLiveReasoningEffortChange_SerializesWithCleanup(t *testing.T) {
+	e := newTestEngine()
+	key := "test:user1"
+	live := &blockingAliveReasoningSession{
+		aliveEntered: make(chan struct{}),
+		releaseAlive: make(chan struct{}),
+		effortSet:    make(chan string, 1),
+	}
+	state := &interactiveState{agentSession: live}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	applied := make(chan bool, 1)
+	go func() {
+		applied <- e.applyLiveReasoningEffortChange(key, "ultra")
+	}()
+	<-live.aliveEntered
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		e.cleanupInteractiveState(key)
+		close(cleanupDone)
+	}()
+
+	select {
+	case <-cleanupDone:
+		t.Fatal("cleanup completed while reasoning change was using agentSession")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(live.releaseAlive)
+	if !<-applied {
+		t.Fatal("live reasoning effort was not applied")
+	}
+	if got := <-live.effortSet; got != "ultra" {
+		t.Fatalf("live effort = %q, want ultra", got)
+	}
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not complete after reasoning change released state lock")
 	}
 }
 
