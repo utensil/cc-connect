@@ -45,6 +45,23 @@ func TestAppServerSession_SetLiveReasoningEffortPreservesThread(t *testing.T) {
 	if got := s.GetReasoningEffort(); got != "ultra" {
 		t.Fatalf("GetReasoningEffort() = %q, want ultra", got)
 	}
+
+	previousThreadEffort := "high"
+	s.applyThreadRuntimeState("/tmp/project", "gpt-5.6-sol", &previousThreadEffort)
+	if got := s.GetReasoningEffort(); got != "ultra" {
+		t.Fatalf("GetReasoningEffort() after thread resume = %q, want explicit ultra override", got)
+	}
+}
+
+func TestAppServerSession_ExplicitEffortSurvivesThreadResume(t *testing.T) {
+	s := &appServerSession{effort: "ultra", effortOverride: true}
+	previousThreadEffort := "low"
+
+	s.applyThreadRuntimeState("/tmp/project", "gpt-5.6-sol", &previousThreadEffort)
+
+	if got := s.GetReasoningEffort(); got != "ultra" {
+		t.Fatalf("GetReasoningEffort() = %q, want explicit ultra override", got)
+	}
 }
 
 func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {

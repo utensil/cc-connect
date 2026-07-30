@@ -161,6 +161,7 @@ type appServerSession struct {
 	workDir        string
 	model          string
 	effort         string
+	effortOverride bool
 	mode           string
 	baseURL        string
 	modelProvider  string
@@ -216,6 +217,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		workDir:          workDir,
 		model:            model,
 		effort:           effort,
+		effortOverride:   strings.TrimSpace(effort) != "",
 		mode:             mode,
 		baseURL:          baseURL,
 		modelProvider:    modelProvider,
@@ -408,7 +410,9 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 	if m := strings.TrimSpace(model); m != "" {
 		s.model = m
 	}
-	s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	if !s.effortOverride {
+		s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	}
 }
 
 func (s *appServerSession) refreshUsage(ctx context.Context) error {
@@ -1010,6 +1014,7 @@ func (s *appServerSession) SetLiveReasoningEffort(effort string) bool {
 	}
 	s.runtimeMu.Lock()
 	s.effort = normalized
+	s.effortOverride = true
 	s.runtimeMu.Unlock()
 	return true
 }
