@@ -5571,7 +5571,7 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 	t.Run("card note", func(t *testing.T) {
 		agent := &stubModelModeAgent{reasoningEfforts: efforts}
 		e := NewEngine("test", agent, nil, "", LangEnglish)
-		card := e.renderReasoningCard()
+		card := e.renderReasoningCard("")
 
 		for _, element := range card.Elements {
 			if note, ok := element.(CardNote); ok && note.Text == wantUsage {
@@ -5580,6 +5580,38 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 		}
 		t.Fatalf("card elements = %#v, want dynamic usage note %q", card.Elements, wantUsage)
 	})
+}
+
+func TestReasoningCard_MultiWorkspaceRendersWorkspaceEffort(t *testing.T) {
+	globalAgent := &stubModelModeAgent{reasoningEffort: "low"}
+	e := NewEngine("test", globalAgent, nil, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	channelID := "C-reasoning-card-ws"
+	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
+
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws.agent = &stubModelModeAgent{
+		reasoningEffort:  "ultra",
+		reasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
+	}
+	ws.sessions = NewSessionManager("")
+
+	sessionKey := "feishu:" + channelID + ":u1"
+	card := e.renderReasoningCard(sessionKey)
+
+	for _, element := range card.Elements {
+		if selectElement, ok := element.(CardSelect); ok {
+			if selectElement.InitValue != "act:/reasoning 8" {
+				t.Fatalf("reasoning card init value = %q, want workspace effort ultra", selectElement.InitValue)
+			}
+			return
+		}
+	}
+	t.Fatalf("reasoning card elements = %#v, want select", card.Elements)
 }
 
 func TestCmdReasoning_SwitchesEffortAndResetsSessionWithoutLiveSupport(t *testing.T) {
