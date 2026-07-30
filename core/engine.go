@@ -9956,10 +9956,16 @@ func (e *Engine) applyLiveReasoningEffortChange(sessionKey, effort string) bool 
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
-	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+	if !ok || state == nil {
 		return false
 	}
-	switcher, ok := state.agentSession.(LiveReasoningEffortSwitcher)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	agentSession := state.agentSession
+	if agentSession == nil || !agentSession.Alive() {
+		return false
+	}
+	switcher, ok := agentSession.(LiveReasoningEffortSwitcher)
 	if !ok {
 		return false
 	}
