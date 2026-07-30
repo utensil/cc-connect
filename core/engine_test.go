@@ -513,6 +513,14 @@ type stubLiveReasoningSession struct {
 	efforts []string
 }
 
+type stubPreservingReasoningAgent struct {
+	stubModelModeAgent
+}
+
+func (a *stubPreservingReasoningAgent) PreservesSessionOnReasoningEffortChange() bool {
+	return true
+}
+
 func (s *stubLiveReasoningSession) SetLiveReasoningEffort(effort string) bool {
 	s.efforts = append(s.efforts, effort)
 	return true
@@ -5667,6 +5675,32 @@ func TestCmdReasoning_AppliesUltraWithoutResettingLiveSession(t *testing.T) {
 	}
 	if got := s.GetAgentSessionID(); got != "existing-session" {
 		t.Fatalf("agent session id = %q, want existing-session", got)
+	}
+	if got := len(s.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want 1", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "current conversation was preserved") {
+		t.Fatalf("sent = %v, want preserved-conversation confirmation", p.sent)
+	}
+}
+
+func TestCmdReasoning_PreservesIdleResumableSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubPreservingReasoningAgent{stubModelModeAgent: stubModelModeAgent{
+		reasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+
+	s := e.sessions.GetOrCreateActive(key)
+	s.SetAgentSessionID("idle-resumable-session", "codex")
+	s.AddHistory("user", "important context")
+
+	e.cmdReasoning(p, msg, []string{"ultra"})
+
+	if got := s.GetAgentSessionID(); got != "idle-resumable-session" {
+		t.Fatalf("agent session id = %q, want idle resumable session preserved", got)
 	}
 	if got := len(s.GetHistory(0)); got != 1 {
 		t.Fatalf("history len = %d, want 1", got)

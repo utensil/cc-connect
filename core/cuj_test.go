@@ -51,6 +51,7 @@ type cujAgent struct {
 	mu       sync.Mutex
 	sessions []*cujAgentSession
 	nextID   int
+	effort   string
 
 	// failStartCount lets tests simulate "agent process won't start" — the
 	// next N StartSession calls return failStartErr. Set both > 0 to use.
@@ -64,8 +65,8 @@ type cujAgent struct {
 	// Used by tests that need to drive a multi-event turn (text chunks +
 	// permission request + result) from a single Send call. See
 	// setNextSessionEvents on cujAgent.
-	nextSessionEvents    []Event
-	nextSessionDelayMs   int
+	nextSessionEvents  []Event
+	nextSessionDelayMs int
 }
 
 func (a *cujAgent) Name() string { return "cuj" }
@@ -95,6 +96,26 @@ func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 	return nil, nil
 }
 func (a *cujAgent) Stop() error { return nil }
+
+func (a *cujAgent) SetReasoningEffort(effort string) {
+	a.mu.Lock()
+	a.effort = effort
+	a.mu.Unlock()
+}
+
+func (a *cujAgent) GetReasoningEffort() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.effort
+}
+
+func (a *cujAgent) AvailableReasoningEfforts() []string {
+	return []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+}
+
+func (a *cujAgent) PreservesSessionOnReasoningEffortChange() bool {
+	return true
+}
 
 // cujAgentSession is an AgentSession whose reply is controllable per-Send.
 // Tests can set reply (and optionally toolEvent) before each Send to drive
@@ -127,6 +148,7 @@ type cujAgentSession struct {
 	// observed
 	sentPrompts []string
 	closeCount  int
+	efforts     []string
 }
 
 // atomic_bool is intentionally lowercase to avoid clash with stdlib atomic.Bool
@@ -194,6 +216,12 @@ func (s *cujAgentSession) RespondPermission(_ string, _ PermissionResult) error 
 func (s *cujAgentSession) Events() <-chan Event                                 { return s.events }
 func (s *cujAgentSession) CurrentSessionID() string                             { return "cuj-agent-session" }
 func (s *cujAgentSession) Alive() bool                                          { return !s.closed.Get() }
+func (s *cujAgentSession) SetLiveReasoningEffort(effort string) bool {
+	s.mu.Lock()
+	s.efforts = append(s.efforts, effort)
+	s.mu.Unlock()
+	return true
+}
 func (s *cujAgentSession) Close() error {
 	s.closed.Set(true)
 	s.mu.Lock()
@@ -1119,6 +1147,56 @@ func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	}
 }
 
+// CUJ-A2b · Changing Codex reasoning effort preserves the conversation:
+// chat → /reasoning ultra → chat continues through the same agent session.
+func TestCUJ_A2b_ReasoningChangePreservesConversation(t *testing.T) {
+	env := newCUJEnv(t)
+	sessionKey := env.userSends("alex", "remember the codeword juniper")
+	env.waitFor("first turn settled", 2*time.Second, func() bool {
+		session := env.engine.sessions.GetOrCreateActive(sessionKey)
+		return len(env.plat.getSent()) >= 1 && !session.Busy() && len(session.GetHistory(0)) >= 2
+	})
+
+	env.agent.mu.Lock()
+	if len(env.agent.sessions) != 1 {
+		env.agent.mu.Unlock()
+		t.Fatalf("agent sessions = %d, want 1 after first turn", len(env.agent.sessions))
+	}
+	liveSession := env.agent.sessions[0]
+	env.agent.mu.Unlock()
+
+	liveSession.mu.Lock()
+	liveSession.reply = "The codeword is juniper."
+	liveSession.mu.Unlock()
+
+	env.userSends("alex", "/reasoning ultra")
+	env.waitFor("preserved-conversation confirmation", 2*time.Second, func() bool {
+		for _, sent := range env.plat.getSent() {
+			if strings.Contains(sent, "current conversation was preserved") {
+				return true
+			}
+		}
+		return false
+	})
+
+	env.userSends("alex", "what was the codeword?")
+	env.waitFor("context-aware reply after reasoning change", 2*time.Second, func() bool {
+		for _, sent := range env.plat.getSent() {
+			if strings.Contains(sent, "The codeword is juniper.") {
+				return true
+			}
+		}
+		return false
+	})
+
+	env.agent.mu.Lock()
+	sessionCount := len(env.agent.sessions)
+	env.agent.mu.Unlock()
+	if sessionCount != 1 {
+		t.Fatalf("agent sessions = %d, want the original conversation session", sessionCount)
+	}
+}
+
 // CUJ-A3 · User uploads image → engine routes it to the agent.
 // (No real vision LLM; we assert the image attachment reaches the agent.)
 func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
@@ -1130,8 +1208,8 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:img", Platform: "test", MessageID: "img1",
 		UserID: "img", UserName: "img",
-		Content: "what is in this image",
-		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
+		Content:  "what is in this image",
+		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -1194,8 +1272,8 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
 		UserID: "file", UserName: "file",
-		Content: "read this file",
-		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
+		Content:  "read this file",
+		Files:    []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -2325,4 +2403,3 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		}
 	}
 }
-

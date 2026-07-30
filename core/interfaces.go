@@ -508,6 +508,14 @@ type LiveReasoningEffortSwitcher interface {
 	SetLiveReasoningEffort(effort string) bool
 }
 
+// ReasoningEffortSessionPreserver is implemented by agents whose persisted
+// conversation IDs can be resumed with a different reasoning effort. It lets
+// the engine preserve an idle conversation even when no live agent process is
+// available to receive the change directly.
+type ReasoningEffortSessionPreserver interface {
+	PreservesSessionOnReasoningEffortChange() bool
+}
+
 // ModelOption describes a selectable model.
 type ModelOption struct {
 	Name  string // model identifier passed to CLI
