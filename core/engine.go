@@ -9824,12 +9824,13 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 
 	switcher.SetReasoningEffort(target)
 	appliedLive := e.applyLiveReasoningEffortChange(msg.SessionKey, target)
-	if !appliedLive {
+	preserved := appliedLive || preservesSessionOnReasoningEffortChange(agent)
+	if !preserved {
 		e.resetSessionForReasoningChange(msg.SessionKey, sessions)
 	}
 
 	msgKey := MsgReasoningChanged
-	if appliedLive {
+	if preserved {
 		msgKey = MsgReasoningChangedLive
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(msgKey, target))
@@ -9963,6 +9964,11 @@ func (e *Engine) applyLiveReasoningEffortChange(sessionKey, effort string) bool 
 		return false
 	}
 	return switcher.SetLiveReasoningEffort(effort)
+}
+
+func preservesSessionOnReasoningEffortChange(agent Agent) bool {
+	preserver, ok := agent.(ReasoningEffortSessionPreserver)
+	return ok && preserver.PreservesSessionOnReasoningEffortChange()
 }
 
 func (e *Engine) resetSessionForReasoningChange(sessionKey string, sessions *SessionManager) {
@@ -12218,7 +12224,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
-				if !e.applyLiveReasoningEffortChange(sessionKey, target) {
+				appliedLive := e.applyLiveReasoningEffortChange(sessionKey, target)
+				if !appliedLive && !preservesSessionOnReasoningEffortChange(agent) {
 					e.resetSessionForReasoningChange(sessionKey, sessions)
 				}
 				return

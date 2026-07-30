@@ -211,6 +211,10 @@ func (a *Agent) AvailableReasoningEfforts() []string {
 	return []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
+func (a *Agent) PreservesSessionOnReasoningEffortChange() bool {
+	return true
+}
+
 func (a *Agent) configuredModels() []core.ModelOption {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
