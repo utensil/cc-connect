@@ -1003,6 +1003,17 @@ func (s *appServerSession) GetReasoningEffort() string {
 	return strings.TrimSpace(s.effort)
 }
 
+func (s *appServerSession) SetLiveReasoningEffort(effort string) bool {
+	normalized := normalizeReasoningEffort(effort)
+	if normalized == "" && strings.TrimSpace(effort) != "" {
+		return false
+	}
+	s.runtimeMu.Lock()
+	s.effort = normalized
+	s.runtimeMu.Unlock()
+	return true
+}
+
 func (s *appServerSession) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 	if err := s.refreshUsage(ctx); err != nil {
 		if cached := s.cachedUsage(); cached != nil {

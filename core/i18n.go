@@ -306,6 +306,7 @@ const (
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
+	MsgReasoningChangedLive  MsgKey = "reasoning_changed_live"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
@@ -2262,6 +2263,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "推理強度已切換為 `%s`，新會話將使用此設定。",
 		LangJapanese:           "推論強度を `%s` に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "Esfuerzo de razonamiento cambiado a `%s`. Las nuevas sesiones usarán esta configuración.",
+	},
+	MsgReasoningChangedLive: {
+		LangEnglish:            "Reasoning effort switched to `%s`. The current conversation was preserved; the next turn will use this setting.",
+		LangChinese:            "推理强度已切换为 `%s`。当前会话已保留，下一轮将使用此设置。",
+		LangTraditionalChinese: "推理強度已切換為 `%s`。目前會話已保留，下一輪將使用此設定。",
+		LangJapanese:           "推論強度を `%s` に切り替えました。現在の会話は保持され、次のターンからこの設定が使用されます。",
+		LangSpanish:            "Esfuerzo de razonamiento cambiado a `%s`. La conversación actual se conservó; el siguiente turno usará esta configuración.",
 	},
 	MsgReasoningNotSupported: {
 		LangEnglish:            "This agent does not support reasoning effort switching.",

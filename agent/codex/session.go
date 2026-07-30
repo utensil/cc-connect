@@ -43,6 +43,7 @@ type codexSession struct {
 	closeOnce      sync.Once
 	cmdMu          sync.Mutex
 	cmds           map[*exec.Cmd]struct{}
+	effortMu       sync.RWMutex
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -262,8 +263,8 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	if cs.baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", cs.baseURL))
 	}
-	if cs.effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
+	if effort := cs.explicitReasoningEffort(); effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
 	}
 
 	if isResume {
@@ -811,11 +812,28 @@ func (cs *codexSession) GetModel() string {
 }
 
 func (cs *codexSession) GetReasoningEffort() string {
-	if effort := strings.TrimSpace(cs.effort); effort != "" {
+	if effort := cs.explicitReasoningEffort(); effort != "" {
 		return effort
 	}
 	_, effort := cs.runtimeConfig()
 	return effort
+}
+
+func (cs *codexSession) explicitReasoningEffort() string {
+	cs.effortMu.RLock()
+	defer cs.effortMu.RUnlock()
+	return strings.TrimSpace(cs.effort)
+}
+
+func (cs *codexSession) SetLiveReasoningEffort(effort string) bool {
+	normalized := normalizeReasoningEffort(effort)
+	if normalized == "" && strings.TrimSpace(effort) != "" {
+		return false
+	}
+	cs.effortMu.Lock()
+	cs.effort = normalized
+	cs.effortMu.Unlock()
+	return true
 }
 
 func (cs *codexSession) Alive() bool {

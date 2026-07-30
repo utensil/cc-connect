@@ -501,6 +501,13 @@ type ReasoningEffortSwitcher interface {
 	AvailableReasoningEfforts() []string
 }
 
+// LiveReasoningEffortSwitcher is an optional interface for running agent
+// sessions that can apply a reasoning-effort change to the next turn without
+// replacing the underlying conversation.
+type LiveReasoningEffortSwitcher interface {
+	SetLiveReasoningEffort(effort string) bool
+}
+
 // ModelOption describes a selectable model.
 type ModelOption struct {
 	Name  string // model identifier passed to CLI

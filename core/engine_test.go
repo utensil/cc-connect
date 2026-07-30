@@ -508,6 +508,16 @@ func (s *stubLiveModeSession) SetLiveMode(mode string) bool {
 	return true
 }
 
+type stubLiveReasoningSession struct {
+	stubAgentSession
+	efforts []string
+}
+
+func (s *stubLiveReasoningSession) SetLiveReasoningEffort(effort string) bool {
+	s.efforts = append(s.efforts, effort)
+	return true
+}
+
 func (a *stubModelModeAgent) SetModel(model string) {
 	a.model = model
 }
@@ -5572,7 +5582,7 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 	})
 }
 
-func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
+func TestCmdReasoning_SwitchesEffortAndResetsSessionWithoutLiveSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubModelModeAgent{}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
@@ -5598,19 +5608,70 @@ func TestCmdReasoning_SwitchesEffortAndResetsSession(t *testing.T) {
 	}
 }
 
-func TestCmdReasoning_RejectsMinimal(t *testing.T) {
+func TestCmdReasoning_AppliesUltraWithoutResettingLiveSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
-	agent := &stubModelModeAgent{}
+	efforts := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+	agent := &stubModelModeAgent{reasoningEfforts: efforts}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	key := "test:user1"
+	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
 
-	e.cmdReasoning(p, msg, []string{"minimal"})
+	live := &stubLiveReasoningSession{}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: live, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Unlock()
 
-	if agent.reasoningEffort != "" {
-		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
+	s := e.sessions.GetOrCreateActive(key)
+	s.SetAgentSessionID("existing-session", "codex")
+	s.AddHistory("user", "important context")
+
+	e.cmdReasoning(p, msg, []string{"ultra"})
+
+	if agent.reasoningEffort != "ultra" {
+		t.Fatalf("reasoning effort = %q, want ultra", agent.reasoningEffort)
 	}
-	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
-		t.Fatalf("sent = %v, want usage without minimal", p.sent)
+	if len(live.efforts) != 1 || live.efforts[0] != "ultra" {
+		t.Fatalf("live efforts = %v, want [ultra]", live.efforts)
+	}
+	if got := s.GetAgentSessionID(); got != "existing-session" {
+		t.Fatalf("agent session id = %q, want existing-session", got)
+	}
+	if got := len(s.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want 1", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "current conversation was preserved") {
+		t.Fatalf("sent = %v, want preserved-conversation confirmation", p.sent)
+	}
+}
+
+func TestExecuteCardAction_ReasoningPreservesLiveSession(t *testing.T) {
+	agent := &stubModelModeAgent{
+		reasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
+	}
+	e := NewEngine("test", agent, nil, "", LangEnglish)
+	key := "test:user1"
+	live := &stubLiveReasoningSession{}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{agentSession: live}
+	e.interactiveMu.Unlock()
+
+	s := e.sessions.GetOrCreateActive(key)
+	s.SetAgentSessionID("existing-session", "codex")
+	s.AddHistory("user", "important context")
+
+	e.executeCardAction("/reasoning", "8", key)
+
+	if agent.reasoningEffort != "ultra" {
+		t.Fatalf("reasoning effort = %q, want ultra", agent.reasoningEffort)
+	}
+	if len(live.efforts) != 1 || live.efforts[0] != "ultra" {
+		t.Fatalf("live efforts = %v, want [ultra]", live.efforts)
+	}
+	if got := s.GetAgentSessionID(); got != "existing-session" {
+		t.Fatalf("agent session id = %q, want existing-session", got)
+	}
+	if got := len(s.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want 1", got)
 	}
 }
 
