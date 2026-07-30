@@ -9823,14 +9823,16 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	appliedLive := e.applyLiveReasoningEffortChange(msg.SessionKey, target)
+	if !appliedLive {
+		e.resetSessionForReasoningChange(msg.SessionKey, sessions)
+	}
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
-	sessions.Save()
-
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+	msgKey := MsgReasoningChanged
+	if appliedLive {
+		msgKey = MsgReasoningChangedLive
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(msgKey, target))
 }
 
 func (e *Engine) reasoningUsage(efforts []string) string {
@@ -9946,6 +9948,29 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 		return false
 	}
 	return switcher.SetLiveMode(mode)
+}
+
+func (e *Engine) applyLiveReasoningEffortChange(sessionKey, effort string) bool {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+	switcher, ok := state.agentSession.(LiveReasoningEffortSwitcher)
+	if !ok {
+		return false
+	}
+	return switcher.SetLiveReasoningEffort(effort)
+}
+
+func (e *Engine) resetSessionForReasoningChange(sessionKey string, sessions *SessionManager) {
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+	s := sessions.GetOrCreateActive(sessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
@@ -12180,7 +12205,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		switcher, ok := agent.(ReasoningEffortSwitcher)
 		if !ok {
 			return
 		}
@@ -12192,11 +12218,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		for _, effort := range efforts {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
-				e.cleanupInteractiveState(interactiveKey)
-				s := e.sessions.GetOrCreateActive(sessionKey)
-				s.SetAgentSessionID("", "")
-				s.ClearHistory()
-				e.sessions.Save()
+				if !e.applyLiveReasoningEffortChange(sessionKey, target) {
+					e.resetSessionForReasoningChange(sessionKey, sessions)
+				}
 				return
 			}
 		}

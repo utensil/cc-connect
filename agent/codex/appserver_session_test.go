@@ -31,6 +31,22 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_SetLiveReasoningEffortPreservesThread(t *testing.T) {
+	s := &appServerSession{effort: "high"}
+	s.threadID.Store("thread-existing")
+
+	if !s.SetLiveReasoningEffort("ultra") {
+		t.Fatal("SetLiveReasoningEffort(ultra) = false, want true")
+	}
+
+	if got := s.CurrentSessionID(); got != "thread-existing" {
+		t.Fatalf("CurrentSessionID() = %q, want thread-existing", got)
+	}
+	if got := s.GetReasoningEffort(); got != "ultra" {
+		t.Fatalf("GetReasoningEffort() = %q, want ultra", got)
+	}
+}
+
 func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 	s := &appServerSession{}
 	raw, err := json.Marshal(appServerRateLimitsResponse{

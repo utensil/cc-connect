@@ -88,6 +88,41 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestCodexSession_SetLiveReasoningEffortPreservesResumeThread(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "gpt-5.6-sol", "high", "full-auto", "thread-existing", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	if !cs.SetLiveReasoningEffort("ultra") {
+		t.Fatal("SetLiveReasoningEffort(ultra) = false, want true")
+	}
+
+	args := cs.buildExecArgs("continue", nil)
+	if got := cs.CurrentSessionID(); got != "thread-existing" {
+		t.Fatalf("CurrentSessionID() = %q, want thread-existing", got)
+	}
+	if got := cs.GetReasoningEffort(); got != "ultra" {
+		t.Fatalf("GetReasoningEffort() = %q, want ultra", got)
+	}
+	if !containsSequence(args, []string{"-c", `model_reasoning_effort="ultra"`}) {
+		t.Fatalf("args missing live ultra effort: %v", args)
+	}
+	if len(args) < 2 || args[0] != "exec" || args[1] != "resume" {
+		t.Fatalf("args do not resume existing thread: %v", args)
+	}
+	foundThread := false
+	for _, arg := range args {
+		if arg == "thread-existing" {
+			foundThread = true
+			break
+		}
+	}
+	if !foundThread {
+		t.Fatalf("args missing existing thread id: %v", args)
+	}
+}
+
 func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "", "", "")
 	if err != nil {
