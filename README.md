@@ -1,3 +1,7 @@
+For fork features, see [FORK_FEATURES.md](FORK_FEATURES.md).
+
+---
+
 <p align="center">
   <img src="./docs/images/banner.svg" alt="CC-Connect Banner" width="800"/>
 </p>
