@@ -299,6 +299,7 @@ const (
 	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
+	MsgModelSessionChanged   MsgKey = "model_session_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
 	MsgModelCardSwitching    MsgKey = "model_card_switching"
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
@@ -995,7 +996,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
-			"/model [switch <name>]\n  View/switch model\n\n" +
+			"/model [<name>|default <name>]\n  Switch this session; use default for new sessions\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
@@ -1039,7 +1040,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
-			"/model [switch <名称>]\n  查看/切换模型\n\n" +
+			"/model [<名称>|default <名称>]\n  切换当前会话；使用 default 设置新会话默认模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
@@ -1083,7 +1084,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
-			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
+			"/model [<名稱>|default <名稱>]\n  切換目前工作階段；使用 default 設定新工作階段預設模型\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
@@ -1125,7 +1126,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
-			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
+			"/model [<名前>|default <名前>]\n  このセッションを切り替え、default で新規セッションを設定\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
@@ -1167,7 +1168,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
-			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
+			"/model [<nombre>|default <nombre>]\n  Cambiar esta sesión; usar default para sesiones nuevas\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
@@ -1255,35 +1256,35 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
-			"/model [switch <name>] — View/switch model\n" +
+			"/model [<name>|default <name>] — Switch this session; set default for new sessions\n" +
 			"/mode [name] — View/switch permission mode\n" +
 			"/provider [list|add|...] — Manage API providers\n" +
 			"/memory [add|global|...] — View/edit memory files\n" +
 			"/allow <tool> — Pre-allow a tool\n" +
 			"/lang [en|zh|...] — View/switch language",
 		LangChinese: "**Agent 配置**\n" +
-			"/model [switch <名称>] — 查看/切换模型\n" +
+			"/model [<名称>|default <名称>] — 切换当前会话；设置新会话默认模型\n" +
 			"/mode [名称] — 查看/切换权限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/编辑记忆文件\n" +
 			"/allow <工具名> — 预授权工具\n" +
 			"/lang [en|zh|...] — 查看/切换语言",
 		LangTraditionalChinese: "**Agent 配置**\n" +
-			"/model [switch <名稱>] — 查看/切換模型\n" +
+			"/model [<名稱>|default <名稱>] — 切換目前工作階段；設定新工作階段預設模型\n" +
 			"/mode [名稱] — 查看/切換權限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/編輯記憶檔案\n" +
 			"/allow <工具名> — 預授權工具\n" +
 			"/lang [en|zh|...] — 查看/切換語言",
 		LangJapanese: "**エージェント設定**\n" +
-			"/model [switch <名前>] — モデルの表示/切り替え\n" +
+			"/model [<名前>|default <名前>] — このセッションを切り替え、新規セッションの既定を設定\n" +
 			"/mode [名前] — 権限モードの表示/切り替え\n" +
 			"/provider [list|add|...] — API プロバイダ管理\n" +
 			"/memory [add|global|...] — メモリの表示/編集\n" +
 			"/allow <ツール名> — ツールを事前許可\n" +
 			"/lang [en|zh|...] — 言語の表示/切り替え",
 		LangSpanish: "**Configuración del agente**\n" +
-			"/model [switch <nombre>] — Ver/cambiar modelo\n" +
+			"/model [<nombre>|default <nombre>] — Cambiar esta sesión; establecer el predeterminado para sesiones nuevas\n" +
 			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
 			"/provider [list|add|...] — Gestionar proveedores\n" +
 			"/memory [add|global|...] — Ver/editar memoria\n" +
@@ -2215,6 +2216,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
 	},
+	MsgModelSessionChanged: {
+		LangEnglish:            "Model for this session is set to `%s`. New sessions keep the default model.",
+		LangChinese:            "当前会话的模型已设为 `%s`，新会话将继续使用默认模型。",
+		LangTraditionalChinese: "目前工作階段的模型已設為 `%s`，新工作階段將繼續使用預設模型。",
+		LangJapanese:           "このセッションのモデルを `%s` に設定しました。新しいセッションはデフォルトモデルのままです。",
+		LangSpanish:            "El modelo de esta sesión se estableció en `%s`. Las nuevas sesiones mantienen el modelo predeterminado.",
+	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",
 		LangChinese:            "❌ 切换模型失败: %v",
@@ -2511,11 +2519,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelos disponibles:\n",
 	},
 	MsgModelUsage: {
-		LangEnglish:            "Usage: `/model switch <number>` or `/model switch <model_name>`",
-		LangChinese:            "用法: `/model switch <序号>` 或 `/model switch <模型名>`",
-		LangTraditionalChinese: "用法: `/model switch <序號>` 或 `/model switch <模型名>`",
-		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`",
-		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
+		LangEnglish:            "Usage: `/model <model>` changes this session only. Use `/model default <model>` for new sessions.",
+		LangChinese:            "用法: `/model <模型>` 仅切换当前会话。使用 `/model default <模型>` 设置新会话默认模型。",
+		LangTraditionalChinese: "用法: `/model <模型>` 僅切換目前工作階段。使用 `/model default <模型>` 設定新工作階段預設模型。",
+		LangJapanese:           "使い方: `/model <モデル>` はこのセッションだけを切り替えます。新しいセッションには `/model default <モデル>` を使います。",
+		LangSpanish:            "Uso: `/model <modelo>` cambia solo esta sesión. Usa `/model default <modelo>` para sesiones nuevas.",
 	},
 	MsgReasoningDefault: {
 		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",

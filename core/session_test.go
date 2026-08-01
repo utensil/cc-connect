@@ -25,6 +25,17 @@ func TestSessionManager_GetOrCreateActive(t *testing.T) {
 	}
 }
 
+func TestSession_ModelOverridePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	sm := NewSessionManager(path)
+	sm.GetOrCreateActive("user1").SetModelOverride("gpt-5.6-sol")
+	sm.Save()
+
+	if got := NewSessionManager(path).GetOrCreateActive("user1").GetModelOverride(); got != "gpt-5.6-sol" {
+		t.Fatalf("model override = %q, want gpt-5.6-sol", got)
+	}
+}
+
 func TestSessionManager_NewSession(t *testing.T) {
 	sm := NewSessionManager("")
 	s1 := sm.NewSession("user1", "chat-a")
@@ -1117,4 +1128,3 @@ func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
 		t.Fatalf("filterOwnedSessions returned %d, want 3", len(filtered))
 	}
 }
-

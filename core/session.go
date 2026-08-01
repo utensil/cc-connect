@@ -30,6 +30,7 @@ type Session struct {
 	// in-memory active provider does not). Empty means "no explicit choice
 	// — use whatever the agent's default is".
 	ActiveProvider string         `json:"active_provider,omitempty"`
+	ModelOverride  string         `json:"model_override,omitempty"` // Per-session model selection.
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
@@ -181,6 +182,20 @@ func (s *Session) GetActiveProvider() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ActiveProvider
+}
+
+// SetModelOverride records a model selection for this conversation only.
+func (s *Session) SetModelOverride(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ModelOverride = strings.TrimSpace(model)
+}
+
+// GetModelOverride returns the selected model for this conversation, if any.
+func (s *Session) GetModelOverride() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ModelOverride
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -642,6 +657,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
+			ModelOverride:       s.ModelOverride,
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,

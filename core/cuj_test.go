@@ -1817,9 +1817,29 @@ func TestCUJ_F1_ProviderSwitchLinkedToAgent(t *testing.T) {
 	t.Log("CUJ-F1: provider switching is per-agent; covered by agent/*_test.go provider tests")
 }
 
-// CUJ-F2 · /model switches model — same pattern as F1, agent-managed.
-func TestCUJ_F2_ModelSwitchLinkedToAgent(t *testing.T) {
-	t.Log("CUJ-F2: model switching is per-agent; covered by agent/*_test.go model tests")
+// CUJ-F2 · The ordinary /model command is scoped to the current conversation;
+// an explicit default command is required to affect future conversations.
+func TestCUJ_F2_ModelScopesStayIsolated(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	agent := &stubSessionModelAgent{stubModelModeAgent: stubModelModeAgent{model: "old-default"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:alice", ReplyCtx: "ctx", Platform: "test", UserID: "alice"}
+
+	e.cmdModel(p, msg, []string{"gpt"})
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).GetModelOverride(); got != "gpt-4.1" {
+		t.Fatalf("session model = %q, want gpt-4.1", got)
+	}
+	if got := agent.GetModel(); got != "old-default" {
+		t.Fatalf("default after bare command = %q, want old-default", got)
+	}
+
+	e.cmdModel(p, msg, []string{"default", "gpt-4.1-mini"})
+	if got := agent.GetModel(); got != "gpt-4.1-mini" {
+		t.Fatalf("default model = %q, want gpt-4.1-mini", got)
+	}
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).GetModelOverride(); got != "gpt-4.1" {
+		t.Fatalf("session model after default change = %q, want gpt-4.1", got)
+	}
 }
 
 // CUJ-F3 · /lang switches i18n locale; next reply uses new language.

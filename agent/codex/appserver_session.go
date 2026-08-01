@@ -160,6 +160,7 @@ type appServerSession struct {
 	url            string
 	workDir        string
 	model          string
+	modelOverride  bool
 	effort         string
 	effortOverride bool
 	mode           string
@@ -210,12 +211,13 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model string, modelOverride bool, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
 		workDir:          workDir,
 		model:            model,
+		modelOverride:    modelOverride,
 		effort:           effort,
 		effortOverride:   strings.TrimSpace(effort) != "",
 		mode:             mode,
@@ -356,6 +358,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
+		s.reapplyModelOverrideAfterResume()
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		return nil
 	}
@@ -371,6 +374,21 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	s.threadID.Store(resp.Thread.ID)
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	return nil
+}
+
+// reapplyModelOverrideAfterResume changes the resumed thread in place. Codex
+// may return the historical model from thread/resume even when a model was
+// supplied in that request, while thread/settings/update preserves context.
+func (s *appServerSession) reapplyModelOverrideAfterResume() {
+	s.runtimeMu.RLock()
+	modelOverride := s.modelOverride
+	s.runtimeMu.RUnlock()
+	if !modelOverride {
+		return
+	}
+	if model := s.GetModel(); model != "" && !s.SetLiveModel(model) {
+		slog.Warn("codex app-server: failed to reapply session model after resume", "model", model, "thread_id", s.CurrentSessionID())
+	}
 }
 
 func (s *appServerSession) threadRequestParams() map[string]any {
@@ -407,8 +425,10 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 	if dir := strings.TrimSpace(workDir); dir != "" {
 		s.workDir = dir
 	}
-	if m := strings.TrimSpace(model); m != "" {
-		s.model = m
+	if !s.modelOverride {
+		if m := strings.TrimSpace(model); m != "" {
+			s.model = m
+		}
 	}
 	if !s.effortOverride {
 		s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
@@ -1025,6 +1045,7 @@ func (s *appServerSession) SetLiveModel(model string) bool {
 
 	s.runtimeMu.Lock()
 	s.model = model
+	s.modelOverride = true
 	s.runtimeMu.Unlock()
 	return true
 }

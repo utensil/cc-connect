@@ -490,7 +490,10 @@ start if any gate fails or if the probe detects a cross-user leak.
 
 ```
 /model                      List available models (format: alias - model)
-/model switch <alias>       Switch to model by alias
+/model <alias>              Switch only the current session
+/model default <alias>      Set the default model for new sessions
+/model session <alias>      Explicit current-session switch
+/model switch <alias>       Explicit current-session switch
 ```
 
 
