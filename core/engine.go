@@ -9624,11 +9624,12 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.cleanupInteractiveState(interactiveKey)
+	if !e.applyLiveModelChange(msg.SessionKey, target) {
+		e.cleanupInteractiveState(interactiveKey)
+	}
 
-	// Keep the existing agent session ID so the next StartSession uses
-	// --resume <id> --model <new>, which lets the CLI agent restore context
-	// natively without replaying history (no extra token cost).
+	// A session without live model switching is restarted, but its saved ID is
+	// retained so agents that support cross-model resume can restore context.
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
@@ -9949,6 +9950,27 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 		return false
 	}
 	return switcher.SetLiveMode(mode)
+}
+
+func (e *Engine) applyLiveModelChange(sessionKey, model string) bool {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil || !agentSession.Alive() {
+		return false
+	}
+	switcher, ok := agentSession.(LiveModelSwitcher)
+	if !ok {
+		return false
+	}
+	return switcher.SetLiveModel(model)
 }
 
 func (e *Engine) applyLiveReasoningEffortChange(sessionKey, effort string) bool {
@@ -12130,7 +12152,10 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	if err == nil {
 		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
 	}
-	e.cleanupInteractiveState(interactiveKey)
+	liveApplied := err == nil && e.applyLiveModelChange(sessionKey, resolved)
+	if !liveApplied {
+		e.cleanupInteractiveState(interactiveKey)
+	}
 	if err == nil {
 		sessions.Save()
 	}
@@ -12200,7 +12225,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = resolveModelSwitchTarget(target, models)
 		}
 		cancel()
-		e.cleanupInteractiveState(interactiveKey)
 		e.interactiveMu.Lock()
 		state := e.interactiveStates[interactiveKey]
 		if state == nil {
@@ -12738,9 +12762,11 @@ func (e *Engine) pushDeleteModeResultCard(sessionKey string) {
 
 func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string) {
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
+	liveApplied := false
 	if err == nil {
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
+		liveApplied = e.applyLiveModelChange(sessionKey, resolved)
 		sessions.Save()
 	}
 
@@ -12759,7 +12785,9 @@ func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveSt
 		state.mu.Unlock()
 	}
 	e.pushModelSwitchResultCard(sessionKey, resultCard)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey), state)
+	if !liveApplied {
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey), state)
+	}
 }
 
 func (e *Engine) pushModelSwitchResultCard(sessionKey string, card *Card) {

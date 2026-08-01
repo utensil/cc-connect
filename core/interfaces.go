@@ -484,13 +484,19 @@ type MemoryFileProvider interface {
 }
 
 // ModelSwitcher is an optional interface for agents that support runtime model switching.
-// Model changes take effect on the next session (existing sessions keep their model).
+// Running sessions keep their model unless they also implement LiveModelSwitcher.
 type ModelSwitcher interface {
 	SetModel(model string)
 	GetModel() string
 	// AvailableModels tries to fetch models from the provider API.
 	// Falls back to a built-in list on failure.
 	AvailableModels(ctx context.Context) []ModelOption
+}
+
+// LiveModelSwitcher is an optional interface for running agent sessions that
+// can change models without replacing their underlying conversation.
+type LiveModelSwitcher interface {
+	SetLiveModel(model string) bool
 }
 
 // ReasoningEffortSwitcher is an optional interface for agents that support

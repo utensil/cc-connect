@@ -508,6 +508,16 @@ func (s *stubLiveModeSession) SetLiveMode(mode string) bool {
 	return true
 }
 
+type stubLiveModelSession struct {
+	stubAgentSession
+	models []string
+}
+
+func (s *stubLiveModelSession) SetLiveModel(model string) bool {
+	s.models = append(s.models, model)
+	return true
+}
+
 type stubLiveReasoningSession struct {
 	stubAgentSession
 	efforts []string
@@ -4970,6 +4980,40 @@ func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
 	}
 	if got := len(s.GetHistory(0)); got != 1 {
 		t.Fatalf("history len = %d, want 1 (original entry preserved)", got)
+	}
+}
+
+func TestCmdModel_LiveSwitchPreservesActiveSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{model: "gpt-4.1-mini"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.SetAgentSessionID("thread-existing", "test")
+	session.AddHistory("user", "keep this context")
+	live := &stubLiveModelSession{}
+	state := &interactiveState{agentSession: live, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[msg.SessionKey] = state
+	e.interactiveMu.Unlock()
+
+	e.cmdModel(p, msg, []string{"switch", "gpt"})
+
+	if got := live.models; !reflect.DeepEqual(got, []string{"gpt-4.1"}) {
+		t.Fatalf("live models = %#v, want [gpt-4.1]", got)
+	}
+	if got := session.GetAgentSessionID(); got != "thread-existing" {
+		t.Fatalf("session id = %q, want preserved thread-existing", got)
+	}
+	if got := len(session.GetHistory(0)); got != 1 {
+		t.Fatalf("history len = %d, want 1", got)
+	}
+	e.interactiveMu.Lock()
+	gotState := e.interactiveStates[msg.SessionKey]
+	e.interactiveMu.Unlock()
+	if gotState != state {
+		t.Fatal("live model switch removed the active session")
 	}
 }
 
