@@ -1,14 +1,16 @@
 # Fork features
 
 This is the source of truth for behavior carried by `utensil/cc-connect` that
-is not simply a mirror of `utiberious/cc-connect`. Keep this ledger current
-whenever fork-specific behavior is added, removed, or superseded upstream.
+differs from the real upstream,
+[`chenhg5/cc-connect`](https://github.com/chenhg5/cc-connect). Keep this
+ledger current whenever fork-specific behavior is added, removed, or
+superseded there.
 
 ## Branch policy
 
 - `dev` is this fork's default and product branch.
-- `main` is reserved for a clean sync of `utiberious/cc-connect` and must not
-  receive fork-only changes.
+- `main` is reserved for clean upstream synchronization and must not receive
+  fork-only changes.
 - The README contains only a short pointer to this file. Keeping the feature
   details here makes upstream README refreshes a small, isolated merge.
 
@@ -25,8 +27,9 @@ fallback if a reaction cannot be added.
 - Fork commits: [33145614](https://github.com/utensil/cc-connect/commit/33145614)
   and [bf8d3a5f](https://github.com/utensil/cc-connect/commit/bf8d3a5f), both
   authored by Miro (`@utiberious`).
-- Upstream reference: [`utiberious` a89c8619](https://github.com/utiberious/cc-connect/commit/a89c8619a5d8c1b853f4945c4d4b6eeab42e8246),
-  authored by Ulysses Tiberious, has the same combined behavior on its `main`.
+- Related-fork reference: [`utiberious` a89c8619](https://github.com/utiberious/cc-connect/commit/a89c8619a5d8c1b853f4945c4d4b6eeab42e8246),
+  authored by Ulysses Tiberious, has the same combined behavior on that
+  fork's `main`.
 - Merge status: not cherry-picked. The Discord implementation and docs in
   `dev` already cover it, so merging it would duplicate/conflict with the
   fork's changes.
@@ -94,7 +97,8 @@ fallback.
 ## Maintenance rules
 
 For every new fork feature, add a short behavior description, the commit that
-landed on `dev`, and its PR. If it comes from an upstream PR or commit, link
-that source and say whether it was merged, reimplemented, or intentionally
-left unmerged. If upstream adopts a fork feature, update this entry with the
-upstream link before removing any fork delta.
+landed on `dev`, and its PR. If it comes from a real-upstream PR or commit,
+link the `chenhg5/cc-connect` source and say whether it was merged,
+reimplemented, or intentionally left unmerged. Record related-fork commits
+separately. If the real upstream adopts a fork feature, update this entry with
+the upstream link before removing any fork delta.
