@@ -484,6 +484,16 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, "")
+}
+
+// StartSessionWithModel starts or resumes one conversation with a model
+// override, leaving the agent-wide default unchanged for other sessions.
+func (a *Agent) StartSessionWithModel(ctx context.Context, sessionID, modelOverride string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, strings.TrimSpace(modelOverride))
+}
+
+func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
@@ -512,6 +522,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
+	if modelOverride != "" {
+		model = modelOverride
+	}
 
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
@@ -523,7 +536,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, appServerURL, workDir, model, modelOverride != "", reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)

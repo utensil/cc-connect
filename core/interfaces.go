@@ -499,6 +499,12 @@ type LiveModelSwitcher interface {
 	SetLiveModel(model string) bool
 }
 
+// SessionModelStarter is implemented by agents that can create or resume one
+// conversation with a model override without changing the agent-wide default.
+type SessionModelStarter interface {
+	StartSessionWithModel(ctx context.Context, sessionID, model string) (AgentSession, error)
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {

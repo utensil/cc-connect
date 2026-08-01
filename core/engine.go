@@ -4063,8 +4063,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 	isResume := startSessionID != ""
+	modelOverride := session.GetModelOverride()
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := startAgentSessionWithModelOverride(e.ctx, agent, startSessionID, modelOverride)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -4077,7 +4078,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = startAgentSessionWithModelOverride(e.ctx, agent, "", modelOverride)
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -4153,6 +4154,15 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	})
 
 	return state
+}
+
+func startAgentSessionWithModelOverride(ctx context.Context, agent Agent, sessionID, modelOverride string) (AgentSession, error) {
+	if model := strings.TrimSpace(modelOverride); model != "" {
+		if starter, ok := agent.(SessionModelStarter); ok {
+			return starter.StartSessionWithModel(ctx, sessionID, model)
+		}
+	}
+	return agent.StartSession(ctx, sessionID)
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
@@ -9551,7 +9561,10 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			models := switcher.AvailableModels(fetchCtx)
 
 			var sb strings.Builder
-			current := switcher.GetModel()
+			current := sessions.GetOrCreateActive(msg.SessionKey).GetModelOverride()
+			if current == "" {
+				current = switcher.GetModel()
+			}
 			if current == "" {
 				sb.WriteString(e.i18n.T(MsgModelDefault))
 			} else {
@@ -9586,7 +9599,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					label = "▶ " + label
 				}
-				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model switch %d", i+1)})
+				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model session %d", i+1)})
 				if len(row) >= 3 {
 					buttons = append(buttons, row)
 					row = nil
@@ -9604,7 +9617,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	targetInput, ok := parseModelSwitchArgs(args)
+	targetInput, setDefault, ok := parseModelSwitchArgs(args)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelUsage))
 		return
@@ -9618,21 +9631,35 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		target = resolveModelSwitchTarget(target, models)
 	}
 
-	target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+	if setDefault {
+		// Keep an already-started current conversation on its old model. A
+		// default change is for sessions created after this command.
+		previousModel := switcher.GetModel()
+		target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
+			return
+		}
+		currentSession := sessions.GetOrCreateActive(msg.SessionKey)
+		if currentSession.GetAgentSessionID() != "" && currentSession.GetModelOverride() == "" && previousModel != "" {
+			currentSession.SetModelOverride(previousModel)
+		}
+		e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
+		sessions.Save()
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 		return
 	}
-	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
+
+	if _, ok := agent.(SessionModelStarter); !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
+		return
+	}
+	sessions.GetOrCreateActive(msg.SessionKey).SetModelOverride(target)
+	sessions.Save()
 	if !e.applyLiveModelChange(msg.SessionKey, target) {
 		e.cleanupInteractiveState(interactiveKey)
 	}
-
-	// A session without live model switching is restarted, but its saved ID is
-	// retained so agents that support cross-model resume can restore context.
-	sessions.Save()
-
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelSessionChanged, target))
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
@@ -9674,20 +9701,30 @@ func modelSwitchNeedsLookup(input string) bool {
 	return !strings.Contains(input, "/")
 }
 
-func parseModelSwitchArgs(args []string) (string, bool) {
-	if len(args) == 0 {
-		return "", false
-	}
+func parseModelSwitchArgs(args []string) (target string, setDefault bool, ok bool) {
 	if len(args) == 1 {
-		if strings.EqualFold(strings.TrimSpace(args[0]), "switch") {
-			return "", false
+		target = strings.TrimSpace(args[0])
+		switch strings.ToLower(target) {
+		case "default", "session", "switch":
+			return "", false, false
 		}
-		return args[0], true
+		return target, false, target != ""
 	}
-	if strings.EqualFold(strings.TrimSpace(args[0]), "switch") && len(args) >= 2 {
-		return strings.TrimSpace(args[1]), true
+	if len(args) != 2 {
+		return "", false, false
 	}
-	return "", false
+	target = strings.TrimSpace(args[1])
+	if target == "" {
+		return "", false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "default":
+		return target, true, true
+	case "session", "switch":
+		return target, false, true
+	default:
+		return "", false, false
+	}
 }
 
 // switchModel applies a runtime model selection to the global engine agent and
@@ -10676,6 +10713,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			s.SetAgentSessionID("", "")
 			s.ClearHistory()
 			s.SetActiveProvider("")
+			s.SetModelOverride("")
 			sessions.Save()
 		}
 		// Only persist to global config when operating on the global agent;
@@ -10826,6 +10864,7 @@ func (e *Engine) resetAllSessions() {
 	for _, s := range e.sessions.AllSessions() {
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
+		s.SetModelOverride("")
 	}
 	e.sessions.Save()
 }
@@ -10840,6 +10879,7 @@ func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManag
 	s := sessions.GetOrCreateActive(msg.SessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
+	s.SetModelOverride("")
 	// Persist the provider choice so that a subsequent --resume after a
 	// cc-connect process restart can re-bind the agent's activeIdx; without
 	// this the agent reverts to its default provider while the saved
@@ -12135,8 +12175,8 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
 	}
 
-	target, ok := parseModelSwitchArgs(strings.Fields(args))
-	if !ok {
+	target, setDefault, ok := parseModelSwitchArgs(strings.Fields(args))
+	if !ok || setDefault {
 		return e.renderModelCard(sessionKey)
 	}
 	target = strings.TrimSpace(target)
@@ -12147,20 +12187,17 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		cancel()
 	}
 
-	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-	if err == nil {
-		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
+	if _, ok := agent.(SessionModelStarter); !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
 	}
-	liveApplied := err == nil && e.applyLiveModelChange(sessionKey, resolved)
+	sessions.GetOrCreateActive(sessionKey).SetModelOverride(target)
+	sessions.Save()
+	liveApplied := e.applyLiveModelChange(sessionKey, target)
 	if !liveApplied {
 		e.cleanupInteractiveState(interactiveKey)
 	}
-	if err == nil {
-		sessions.Save()
-	}
-
-	return e.renderModelSwitchResultCard(resolved, err)
+	return e.renderModelSwitchResultCard(target, nil)
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
@@ -12214,8 +12251,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
-		target, ok := parseModelSwitchArgs(strings.Fields(args))
-		if !ok {
+		target, setDefault, ok := parseModelSwitchArgs(strings.Fields(args))
+		if !ok || setDefault {
 			cancel()
 			return
 		}
@@ -12761,13 +12798,16 @@ func (e *Engine) pushDeleteModeResultCard(sessionKey string) {
 }
 
 func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string) {
-	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
-	liveApplied := false
-	if err == nil {
-		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
-		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
-		liveApplied = e.applyLiveModelChange(sessionKey, resolved)
+	resolved := target
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	liveApplied := true
+	var err error
+	if _, ok := agent.(SessionModelStarter); !ok {
+		err = errors.New(e.i18n.T(MsgModelNotSupported))
+	} else {
+		sessions.GetOrCreateActive(sessionKey).SetModelOverride(target)
 		sessions.Save()
+		liveApplied = e.applyLiveModelChange(sessionKey, target)
 	}
 
 	resultCard := e.renderModelSwitchResultCard(resolved, err)
@@ -12779,14 +12819,14 @@ func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveSt
 			if err != nil {
 				state.modelSwitch.result = e.i18n.Tf(MsgModelCardSwitchFailed, err)
 			} else {
-				state.modelSwitch.result = e.i18n.Tf(MsgModelCardSwitched, resolved)
+				state.modelSwitch.result = e.i18n.Tf(MsgModelSessionChanged, resolved)
 			}
 		}
 		state.mu.Unlock()
 	}
 	e.pushModelSwitchResultCard(sessionKey, resultCard)
-	if !liveApplied {
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey), state)
+	if err == nil && !liveApplied {
+		e.cleanupInteractiveState(interactiveKey, state)
 	}
 }
 
@@ -12995,10 +13035,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		return e.renderModelSwitchingCard(ms.target)
 	}
 
-	agent := e.agent
-	if sessionKey != "" {
-		agent, _ = e.sessionContextForKey(sessionKey)
-	}
+	agent, sessions := e.sessionContextForKey(sessionKey)
 
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
@@ -13009,6 +13046,11 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 	defer cancel()
 	models := switcher.AvailableModels(fetchCtx)
 	current := switcher.GetModel()
+	if sessionKey != "" {
+		if override := sessions.GetOrCreateActive(sessionKey).GetModelOverride(); override != "" {
+			current = override
+		}
+	}
 
 	var sb strings.Builder
 	if current == "" {
@@ -13026,7 +13068,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		} else if m.Desc != "" {
 			label += " — " + m.Desc
 		}
-		val := fmt.Sprintf("act:/model switch %d", i+1)
+		val := fmt.Sprintf("act:/model session %d", i+1)
 		opts = append(opts, CardSelectOption{Text: label, Value: val})
 		if m.Name == current {
 			initVal = val
@@ -13058,7 +13100,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 	}
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleModel), "green").
-		Markdown(e.i18n.Tf(MsgModelCardSwitched, target)).
+		Markdown(e.i18n.Tf(MsgModelSessionChanged, target)).
 		Buttons(e.modelCardBackButton()).
 		Build()
 }

@@ -22,25 +22,31 @@ func TestResolveModelAlias_NoMatchFallsBackToInput(t *testing.T) {
 
 func TestParseModelSwitchArgs(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want string
-		ok   bool
+		name         string
+		args         []string
+		want         string
+		defaultScope bool
+		ok           bool
 	}{
-		{name: "legacy syntax", args: []string{"gpt"}, want: "gpt", ok: true},
+		{name: "bare session syntax", args: []string{"gpt"}, want: "gpt", ok: true},
+		{name: "session syntax", args: []string{"session", "gpt"}, want: "gpt", ok: true},
 		{name: "switch syntax", args: []string{"switch", "gpt"}, want: "gpt", ok: true},
+		{name: "default syntax", args: []string{"default", "gpt"}, want: "gpt", defaultScope: true, ok: true},
 		{name: "missing switch target", args: []string{"switch"}, ok: false},
 		{name: "unknown subcommand", args: []string{"list", "gpt"}, ok: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := parseModelSwitchArgs(tt.args)
+			got, defaultScope, ok := parseModelSwitchArgs(tt.args)
 			if ok != tt.ok {
 				t.Fatalf("parseModelSwitchArgs() ok = %v, want %v", ok, tt.ok)
 			}
 			if got != tt.want {
 				t.Fatalf("parseModelSwitchArgs() = %q, want %q", got, tt.want)
+			}
+			if defaultScope != tt.defaultScope {
+				t.Fatalf("parseModelSwitchArgs() defaultScope = %v, want %v", defaultScope, tt.defaultScope)
 			}
 		})
 	}

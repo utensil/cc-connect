@@ -69,6 +69,49 @@ func TestAppServerSession_SetLiveModelPreservesThread(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_ReappliesModelOverrideAfterThreadResume(t *testing.T) {
+	var s *appServerSession
+	var methods []string
+	var updateParams map[string]any
+	stdin := &callbackWriteCloser{onWrite: func(p []byte) {
+		var request map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(p), &request); err != nil {
+			panic(fmt.Sprintf("decode request: %v", err))
+		}
+		method, _ := request["method"].(string)
+		methods = append(methods, method)
+		id := int64(request["id"].(float64))
+		switch method {
+		case "thread/resume":
+			s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{"cwd":"/tmp/project","model":"gpt-5.6-terra","thread":{"id":"thread-existing"}}`)})
+		case "thread/settings/update":
+			updateParams, _ = request["params"].(map[string]any)
+			s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{}`)})
+		default:
+			panic(fmt.Sprintf("unexpected method: %s", method))
+		}
+	}}
+	s = newScriptedAppServerSession(t, stdin)
+	s.model = "gpt-5.6-sol"
+	s.modelOverride = true
+
+	if err := s.ensureThread("thread-existing"); err != nil {
+		t.Fatalf("ensureThread() error = %v", err)
+	}
+	if got, want := strings.Join(methods, ","), "thread/resume,thread/settings/update"; got != want {
+		t.Fatalf("methods = %q, want %q", got, want)
+	}
+	if got := updateParams["threadId"]; got != "thread-existing" {
+		t.Fatalf("threadId = %#v, want thread-existing", got)
+	}
+	if got := updateParams["model"]; got != "gpt-5.6-sol" {
+		t.Fatalf("model = %#v, want gpt-5.6-sol", got)
+	}
+	if got := s.GetModel(); got != "gpt-5.6-sol" {
+		t.Fatalf("GetModel() = %q, want gpt-5.6-sol", got)
+	}
+}
+
 func TestAppServerSession_SetLiveReasoningEffortPreservesThread(t *testing.T) {
 	s := &appServerSession{effort: "high"}
 	s.threadID.Store("thread-existing")
