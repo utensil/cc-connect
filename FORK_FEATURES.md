@@ -94,6 +94,19 @@ fallback.
 - Merge record: [PR #4](https://github.com/utensil/cc-connect/pull/4), merged
   as [61310b27](https://github.com/utensil/cc-connect/commit/61310b27).
 
+### Session-scoped Codex model selection and durable resume
+
+Bare `/model <model>` changes only the current session. Use
+`/model default <model>` to choose the default for new sessions; `session`
+and `switch` remain explicit current-session aliases. The selected model is
+stored with that session. On resume, the connector reapplies it through
+`thread/settings/update`, because `thread/resume` can return the historical
+model even when given an override. The existing thread ID and context remain
+intact.
+
+- Fork commit: [cfad9612](https://github.com/utensil/cc-connect/commit/cfad9612).
+- Merge record: [PR #6](https://github.com/utensil/cc-connect/pull/6).
+
 ## Maintenance rules
 
 For every new fork feature, add a short behavior description, the commit that
