@@ -1001,6 +1001,34 @@ func (s *appServerSession) GetModel() string {
 	return strings.TrimSpace(s.model)
 }
 
+// SetLiveModel updates the model on the existing Codex thread. Resuming a
+// thread with a model override keeps the thread's previous model, so model
+// changes must use the app-server thread settings API instead.
+func (s *appServerSession) SetLiveModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" || !s.Alive() {
+		return false
+	}
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return false
+	}
+
+	params := map[string]any{
+		"threadId": threadID,
+		"model":    model,
+	}
+	if err := s.request("thread/settings/update", params, &struct{}{}); err != nil {
+		slog.Debug("codex app-server: live model change failed", "model", model, "error", err)
+		return false
+	}
+
+	s.runtimeMu.Lock()
+	s.model = model
+	s.runtimeMu.Unlock()
+	return true
+}
+
 func (s *appServerSession) GetReasoningEffort() string {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()

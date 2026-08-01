@@ -31,6 +31,44 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_SetLiveModelPreservesThread(t *testing.T) {
+	var s *appServerSession
+	var method string
+	var params map[string]any
+	stdin := &callbackWriteCloser{onWrite: func(p []byte) {
+		var request map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(p), &request); err != nil {
+			panic(fmt.Sprintf("decode request: %v", err))
+		}
+		method, _ = request["method"].(string)
+		params, _ = request["params"].(map[string]any)
+		id := int64(request["id"].(float64))
+		s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{}`)})
+	}}
+	s = newScriptedAppServerSession(t, stdin)
+	s.threadID.Store("thread-existing")
+	s.model = "gpt-5.6-terra"
+
+	if !s.SetLiveModel("gpt-5.6-sol") {
+		t.Fatal("SetLiveModel returned false")
+	}
+	if method != "thread/settings/update" {
+		t.Fatalf("method = %q, want thread/settings/update", method)
+	}
+	if got := params["threadId"]; got != "thread-existing" {
+		t.Fatalf("threadId = %#v, want thread-existing", got)
+	}
+	if got := params["model"]; got != "gpt-5.6-sol" {
+		t.Fatalf("model = %#v, want gpt-5.6-sol", got)
+	}
+	if got := s.CurrentSessionID(); got != "thread-existing" {
+		t.Fatalf("CurrentSessionID() = %q, want thread-existing", got)
+	}
+	if got := s.GetModel(); got != "gpt-5.6-sol" {
+		t.Fatalf("GetModel() = %q, want gpt-5.6-sol", got)
+	}
+}
+
 func TestAppServerSession_SetLiveReasoningEffortPreservesThread(t *testing.T) {
 	s := &appServerSession{effort: "high"}
 	s.threadID.Store("thread-existing")
