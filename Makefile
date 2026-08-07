@@ -77,6 +77,18 @@ build: web
 build-noweb:
 	go build $(_TAGS_FLAG) -tags 'no_web' -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
 
+# Stable code signing (see scripts/sign-setup.sh). Signing with a fixed
+# self-signed identity keeps the designated requirement constant across
+# rebuilds so macOS TCC grants (Full Disk Access etc.) are NOT reset on
+# reinstall. Run `security unlock-keychain -p "$$(cat ~/.cc-connect/codesign.pass)" ~/.cc-connect/codesign.keychain` first.
+SIGN_KEYCHAIN ?= $(HOME)/.cc-connect/codesign.keychain
+SIGN_IDENT ?= cc-connect Code Signing
+SIGN_IDENTIFIER ?= com.cc-connect.service
+
+sign: $(APP)
+	codesign --keychain "$(SIGN_KEYCHAIN)" -s "$(SIGN_IDENT)" --identifier "$(SIGN_IDENTIFIER)" "$(APP)"
+	@echo "signed $(APP) with $(SIGN_IDENT) (identifier $(SIGN_IDENTIFIER))"
+
 run: build
 	./$(APP)
 
