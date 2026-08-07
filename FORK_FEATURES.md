@@ -133,6 +133,11 @@ next turn starts fresh on the new agent.
     session's agent is spawned — instead of PR #193's 30-call-site context
     refactor, so fork features (steering, reasoning, quiet display, provider
     switching) are untouched.
+  - Session-agent-aware commands (fork commit 8be784c): `/model`, `/mode`,
+    `/reasoning`, `/provider`, `/current`, `/status` resolve the session's
+    effective agent via `sessionAgentFor` instead of `e.agent`, so after
+    `/agent pi` they operate on pi (e.g. `/model` lists deepseek models), not
+    the project's codex agent.
   - **`pi` added to the `/agent` allowlist** (upstream PR allows only
     `codex`/`claudecode`). This is the fork-specific delta that enables
     codex↔pi switching on one Discord bot.
