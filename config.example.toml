@@ -811,6 +811,14 @@ type = "claudecode"
 work_dir = "/path/to/backend"
 mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 
+# Per-agent-type options for /agent switching (fork feature): each switchable
+# backend can declare its own model/mode/work_dir etc. instead of inheriting
+# this options block. Keys are the registered agent types (codex, pi, ...).
+# [projects.agent.options.agents.pi]
+# model = "deepseek/deepseek-v4-pro"
+# mode = "full-auto"
+# work_dir = "/path/to/other"
+
 # Mode options / 模式说明:
 # - "default":            Every tool call requires user approval. / 每次工具调用都需要用户确认。
 # - "acceptEdits" (edit): File edit tools auto-approved; other tools still ask. / 文件编辑自动通过，其他仍需确认。

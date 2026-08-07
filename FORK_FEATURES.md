@@ -115,3 +115,41 @@ link the `chenhg5/cc-connect` source and say whether it was merged,
 reimplemented, or intentionally left unmerged. Record related-fork commits
 separately. If the real upstream adopts a fork feature, update this entry with
 the upstream link before removing any fork delta.
+
+### Session-scoped /agent and /path switching
+
+`/agent <codex|claude|claudecode|pi|reset> [absolute-path]` switches the
+current session's agent type; `/path <absolute-path|reset>` switches the
+current session's work dir. Both are per-session overrides persisted on the
+`Session` row (`agent_override`, `work_dir_override`) and are restored by
+`/switch`, so each Discord thread keeps its own agent/path choice under
+`thread_isolation`. Switching clears the agent session ID and history so the
+next turn starts fresh on the new agent.
+
+- Ported from upstream PR
+  [chenhg5/cc-connect#193](https://github.com/chenhg5/cc-connect/pull/193)
+  (Ginhzh, maintainer-approved), adapted to this fork's engine:
+  - Injection point is `getOrCreateInteractiveStateWith` — the single place a
+    session's agent is spawned — instead of PR #193's 30-call-site context
+    refactor, so fork features (steering, reasoning, quiet display, provider
+    switching) are untouched.
+  - **`pi` added to the `/agent` allowlist** (upstream PR allows only
+    `codex`/`claudecode`). This is the fork-specific delta that enables
+    codex↔pi switching on one Discord bot.
+  - **Per-agent-type options**: `[projects.agent.options.agents.<type>]` lets
+    each switchable backend declare its own `model`/`mode`/`work_dir` etc.
+    instead of inheriting the project's single options block, so a codex
+    project's `codex_home`/`app_server_url`/model do not leak into a switched
+    pi agent and vice versa.
+- Upstream issue:
+  [chenhg5/cc-connect#703](https://github.com/chenhg5/cc-connect/issues/703)
+  ("Multi-Agent Switching Within the Same Project").
+- Fork PR: (this feature's PR) — see the pull request that landed this entry.
+
+### Pre-existing full-suite test flakiness on macOS
+
+`go test -race ./core` (full suite) intermittently fails
+`TestCUJ_A3_ImageReachesAgent` / `TestCUJ_A5_FileReachesAgent` with
+`TempDir RemoveAll cleanup: directory not empty` on macOS. Reproduces on clean
+`origin/dev` (fc22b8b) — unrelated to /agent switching. Run the failing tests
+in isolation (`-run 'TestCUJ'`) to confirm green.

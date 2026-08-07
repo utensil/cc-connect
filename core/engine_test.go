@@ -16916,3 +16916,65 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+func TestCmdAgent_SetsSessionOverride(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/tmp"}, nil, "")
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"pi"})
+
+	s := e.sessions.GetOrCreateActive("test:user1")
+	if got := s.GetAgentOverride(); got != "pi" {
+		t.Fatalf("agent override = %q, want pi", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "pi") {
+		t.Fatalf("reply = %q, want it to mention pi", p.sent)
+	}
+}
+
+func TestCmdAgent_RejectsUnknownAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"bogus"})
+
+	s := e.sessions.GetOrCreateActive("test:user1")
+	if got := s.GetAgentOverride(); got != "" {
+		t.Fatalf("agent override = %q, want empty after invalid target", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Invalid agent") {
+		t.Fatalf("reply = %q, want invalid-agent error", p.sent)
+	}
+}
+
+func TestCmdPath_SetsSessionWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)
+	dir := t.TempDir()
+
+	e.cmdPath(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{dir})
+
+	s := e.sessions.GetOrCreateActive("test:user1")
+	if got := s.GetWorkDirOverride(); got != dir {
+		t.Fatalf("work dir override = %q, want %q", got, dir)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], dir) {
+		t.Fatalf("reply = %q, want it to mention %q", p.sent, dir)
+	}
+}
+
+func TestCmdAgent_StatusShowsCurrentAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/tmp"}, nil, "")
+	s := e.sessions.GetOrCreateActive("test:user1")
+	s.SetAgentOverride("pi")
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "pi") {
+		t.Fatalf("status reply = %q, want current agent pi", p.sent)
+	}
+}

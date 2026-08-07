@@ -1128,3 +1128,34 @@ func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
 		t.Fatalf("filterOwnedSessions returned %d, want 3", len(filtered))
 	}
 }
+
+func TestSession_AgentAndWorkDirOverridePersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	workDir := filepath.Join(t.TempDir(), "sub")
+	sm := NewSessionManager(path)
+	s := sm.GetOrCreateActive("user1")
+	s.SetAgentOverride("pi")
+	s.SetWorkDirOverride(workDir)
+	sm.Save()
+
+	reloaded := NewSessionManager(path).GetOrCreateActive("user1")
+	if got := reloaded.GetAgentOverride(); got != "pi" {
+		t.Fatalf("agent override = %q, want pi", got)
+	}
+	if got := reloaded.GetWorkDirOverride(); got != workDir {
+		t.Fatalf("work dir override = %q, want %q", got, workDir)
+	}
+}
+
+func TestSession_AgentOverrideClearFallsBackToDefault(t *testing.T) {
+	sm := NewSessionManager("")
+	s := sm.GetOrCreateActive("user1")
+	s.SetAgentOverride("pi")
+	if got := s.GetAgentOverride(); got != "pi" {
+		t.Fatalf("agent override = %q, want pi", got)
+	}
+	s.SetAgentOverride("")
+	if got := s.GetAgentOverride(); got != "" {
+		t.Fatalf("cleared agent override = %q, want empty", got)
+	}
+}

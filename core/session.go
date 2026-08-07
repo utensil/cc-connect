@@ -31,6 +31,8 @@ type Session struct {
 	// — use whatever the agent's default is".
 	ActiveProvider string         `json:"active_provider,omitempty"`
 	ModelOverride  string         `json:"model_override,omitempty"` // Per-session model selection.
+	AgentOverride   string         `json:"agent_override,omitempty"` // Per-session agent type override (/agent).
+	WorkDirOverride string         `json:"work_dir_override,omitempty"` // Per-session work dir override (/path).
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
@@ -196,6 +198,36 @@ func (s *Session) GetModelOverride() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ModelOverride
+}
+
+// SetAgentOverride atomically sets the session agent type override (/agent).
+// An empty value clears the override and falls back to the project default.
+func (s *Session) SetAgentOverride(agentType string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentOverride = agentType
+}
+
+// GetAgentOverride atomically reads the session agent type override.
+func (s *Session) GetAgentOverride() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentOverride
+}
+
+// SetWorkDirOverride atomically sets the session work_dir override (/path).
+// An empty value clears the override and falls back to the project default.
+func (s *Session) SetWorkDirOverride(workDir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.WorkDirOverride = workDir
+}
+
+// GetWorkDirOverride atomically reads the session work_dir override.
+func (s *Session) GetWorkDirOverride() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.WorkDirOverride
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -576,6 +608,23 @@ func (sm *SessionManager) FindByID(id string) *Session {
 	return sm.sessions[id]
 }
 
+// FindByAgentSessionID looks up a local session for a user by agent session ID.
+func (sm *SessionManager) FindByAgentSessionID(userKey, agentSessionID string) *Session {
+	if agentSessionID == "" {
+		return nil
+	}
+
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s != nil && s.GetAgentSessionID() == agentSessionID {
+			return s
+		}
+	}
+	return nil
+}
+
 // DeleteByID removes a session by its internal ID from all tracking structures.
 func (sm *SessionManager) DeleteByID(id string) bool {
 	sm.mu.Lock()
@@ -658,6 +707,8 @@ func (sm *SessionManager) saveLocked() {
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			ModelOverride:       s.ModelOverride,
+			AgentOverride:       s.AgentOverride,
+			WorkDirOverride:     s.WorkDirOverride,
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,

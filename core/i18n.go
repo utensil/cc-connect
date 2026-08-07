@@ -237,6 +237,13 @@ const (
 	MsgProviderAddFailed         MsgKey = "provider_add_failed"
 	MsgProviderRemoved           MsgKey = "provider_removed"
 	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
+	MsgAgentStatus              MsgKey = "agent_status"
+	MsgAgentChanged             MsgKey = "agent_changed"
+	MsgAgentUsage               MsgKey = "agent_usage"
+	MsgAgentInvalid             MsgKey = "agent_invalid"
+	MsgPathStatus               MsgKey = "path_status"
+	MsgPathChanged              MsgKey = "path_changed"
+	MsgPathUsage                MsgKey = "path_usage"
 	MsgCardTitleProviderAdd      MsgKey = "card_title_provider_add"
 	MsgProviderAddPickHint       MsgKey = "provider_add_pick_hint"
 	MsgProviderAddOther          MsgKey = "provider_add_other"
@@ -774,11 +781,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Herramientas pre-autorizadas: %s",
 	},
 	MsgCurrentSession: {
-		LangEnglish:            "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d",
-		LangChinese:            "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d",
-		LangTraditionalChinese: "📌 目前工作階段\n名稱: %s\n工作階段 ID: %s\n本機訊息數: %d",
-		LangJapanese:           "📌 現在のセッション\n名前: %s\nセッション ID: %s\nローカルメッセージ数: %d",
-		LangSpanish:            "📌 Sesión actual\nNombre: %s\nID de sesión: %s\nMensajes locales: %d",
+		LangEnglish:            "📌 Current session\nName: %s\nSession ID: %s\nLocal messages: %d\nAgent: %s\nPath: %s",
+		LangChinese:            "📌 当前会话\n名称: %s\n会话 ID: %s\n本地消息数: %d\nAgent: %s\n路径: %s",
+		LangTraditionalChinese: "📌 目前工作階段\n名稱: %s\n工作階段 ID: %s\n本機訊息數: %d\nAgent: %s\n路徑: %s",
+		LangJapanese:           "📌 現在のセッション\n名前: %s\nセッション ID: %s\nローカルメッセージ数: %d\nAgent: %s\nパス: %s",
+		LangSpanish:            "📌 Sesión actual\nNombre: %s\nID de sesión: %s\nMensajes locales: %d\nAgent: %s\nRuta: %s",
 	},
 	MsgToolAuthNotSupported: {
 		LangEnglish:            "This agent does not support tool authorization.",
@@ -997,6 +1004,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [<name>|default <name>]\n  Switch this session; use default for new sessions\n\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [absolute-path]\n  View/switch session agent\n\n" +
+			"/path [absolute-path|reset]\n  View/switch session path\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
@@ -1041,6 +1050,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [<名称>|default <名称>]\n  切换当前会话；使用 default 设置新会话默认模型\n\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [绝对路径]\n  查看/切换当前会话 Agent\n\n" +
+			"/path [绝对路径|reset]\n  查看/切换当前会话路径\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
@@ -1085,6 +1096,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
 			"/model [<名稱>|default <名稱>]\n  切換目前工作階段；使用 default 設定新工作階段預設模型\n\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [絕對路徑]\n  查看/切換目前工作階段 Agent\n\n" +
+			"/path [絕對路徑|reset]\n  查看/切換目前工作階段路徑\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
@@ -1127,6 +1140,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
 			"/model [<名前>|default <名前>]\n  このセッションを切り替え、default で新規セッションを設定\n\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [絶対パス]\n  セッション Agent の表示/切替\n\n" +
+			"/path [絶対パス|reset]\n  セッションパスの表示/切替\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
@@ -1169,6 +1184,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
 			"/model [<nombre>|default <nombre>]\n  Cambiar esta sesión; usar default para sesiones nuevas\n\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [ruta-absoluta]\n  Ver/cambiar agente de sesión\n\n" +
+			"/path [ruta-absoluta|reset]\n  Ver/cambiar ruta de sesión\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
@@ -1257,6 +1274,8 @@ var messages = map[MsgKey]map[Language]string{
 	MsgHelpAgentSection: {
 		LangEnglish: "**Agent Configuration**\n" +
 			"/model [<name>|default <name>] — Switch this session; set default for new sessions\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [absolute-path] — View/switch session agent\n" +
+			"/path [absolute-path|reset] — View/switch session path\n" +
 			"/mode [name] — View/switch permission mode\n" +
 			"/provider [list|add|...] — Manage API providers\n" +
 			"/memory [add|global|...] — View/edit memory files\n" +
@@ -1264,6 +1283,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — View/switch language",
 		LangChinese: "**Agent 配置**\n" +
 			"/model [<名称>|default <名称>] — 切换当前会话；设置新会话默认模型\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [绝对路径] — 查看/切换当前会话 Agent\n" +
+			"/path [绝对路径|reset] — 查看/切换当前会话路径\n" +
 			"/mode [名称] — 查看/切换权限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/编辑记忆文件\n" +
@@ -1271,6 +1292,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切换语言",
 		LangTraditionalChinese: "**Agent 配置**\n" +
 			"/model [<名稱>|default <名稱>] — 切換目前工作階段；設定新工作階段預設模型\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [絕對路徑] — 查看/切換目前工作階段 Agent\n" +
+			"/path [絕對路徑|reset] — 查看/切換目前工作階段路徑\n" +
 			"/mode [名稱] — 查看/切換權限模式\n" +
 			"/provider [list|add|...] — 管理 API Provider\n" +
 			"/memory [add|global|...] — 查看/編輯記憶檔案\n" +
@@ -1278,6 +1301,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 查看/切換語言",
 		LangJapanese: "**エージェント設定**\n" +
 			"/model [<名前>|default <名前>] — このセッションを切り替え、新規セッションの既定を設定\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [絶対パス] — セッション Agent の表示/切替\n" +
+			"/path [絶対パス|reset] — セッションパスの表示/切替\n" +
 			"/mode [名前] — 権限モードの表示/切り替え\n" +
 			"/provider [list|add|...] — API プロバイダ管理\n" +
 			"/memory [add|global|...] — メモリの表示/編集\n" +
@@ -1285,6 +1310,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|...] — 言語の表示/切り替え",
 		LangSpanish: "**Configuración del agente**\n" +
 			"/model [<nombre>|default <nombre>] — Cambiar esta sesión; establecer el predeterminado para sesiones nuevas\n" +
+			"/agent [codex|claude|claudecode|pi|reset] [ruta-absoluta] — Ver/cambiar agente de sesión\n" +
+			"/path [ruta-absoluta|reset] — Ver/cambiar ruta de sesión\n" +
 			"/mode [nombre] — Ver/cambiar modo de permisos\n" +
 			"/provider [list|add|...] — Gestionar proveedores\n" +
 			"/memory [add|global|...] — Ver/editar memoria\n" +
@@ -1591,6 +1618,55 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 移除 Provider 失敗: %v",
 		LangJapanese:           "❌ プロバイダの削除に失敗しました: %v",
 		LangSpanish:            "❌ Error al eliminar proveedor: %v",
+	},
+	MsgAgentStatus: {
+		LangEnglish:            "🤖 Current agent: `%s`\n📂 Current path: `%s`\nDefault agent: `%s`\nDefault path: `%s`",
+		LangChinese:            "🤖 当前 Agent: `%s`\n📂 当前路径: `%s`\n默认 Agent: `%s`\n默认路径: `%s`",
+		LangTraditionalChinese: "🤖 當前 Agent: `%s`\n📂 當前路徑: `%s`\n預設 Agent: `%s`\n預設路徑: `%s`",
+		LangJapanese:           "🤖 現在のエージェント: `%s`\n📂 現在のパス: `%s`\nデフォルト Agent: `%s`\nデフォルトパス: `%s`",
+		LangSpanish:            "🤖 Agente actual: `%s`\n📂 Ruta actual: `%s`\nAgente por defecto: `%s`\nRuta por defecto: `%s`",
+	},
+	MsgAgentChanged: {
+		LangEnglish:            "✅ Session agent set to: `%s`",
+		LangChinese:            "✅ 当前会话 Agent 已切换为: `%s`",
+		LangTraditionalChinese: "✅ 目前會話 Agent 已切換為: `%s`",
+		LangJapanese:           "✅ セッション Agent を `%s` に切り替えました",
+		LangSpanish:            "✅ El agente de la sesión cambió a: `%s`",
+	},
+	MsgAgentUsage: {
+		LangEnglish:            "Usage: `/agent <codex|claude|claudecode|pi|reset> [absolute-path]`",
+		LangChinese:            "用法: `/agent <codex|claude|claudecode|pi|reset> [绝对路径]`",
+		LangTraditionalChinese: "用法: `/agent <codex|claude|claudecode|pi|reset> [絕對路徑]`",
+		LangJapanese:           "使い方: `/agent <codex|claude|claudecode|pi|reset> [絶対パス]`",
+		LangSpanish:            "Uso: `/agent <codex|claude|claudecode|pi|reset> [ruta-absoluta]`",
+	},
+	MsgAgentInvalid: {
+		LangEnglish:            "❌ Invalid agent: `%s`. Allowed: `codex`, `claude`, `claudecode`, `pi`, `reset`",
+		LangChinese:            "❌ 无效的 Agent: `%s`。可用值: `codex`、`claude`、`claudecode`、`pi`、`reset`",
+		LangTraditionalChinese: "❌ 無效的 Agent: `%s`。可用值: `codex`、`claude`、`claudecode`、`pi`、`reset`",
+		LangJapanese:           "❌ 無効な Agent: `%s`。利用可能: `codex`, `claude`, `claudecode`, `pi`, `reset`",
+		LangSpanish:            "❌ Agente inválido: `%s`. Permitidos: `codex`, `claude`, `claudecode`, `pi`, `reset`",
+	},
+	MsgPathStatus: {
+		LangEnglish:            "📂 Current session path: `%s`\nDefault path: `%s`",
+		LangChinese:            "📂 当前会话路径: `%s`\n默认路径: `%s`",
+		LangTraditionalChinese: "📂 當前會話路徑: `%s`\n預設路徑: `%s`",
+		LangJapanese:           "📂 現在のセッションパス: `%s`\nデフォルトパス: `%s`",
+		LangSpanish:            "📂 Ruta actual de la sesión: `%s`\nRuta por defecto: `%s`",
+	},
+	MsgPathChanged: {
+		LangEnglish:            "✅ Session path set to: `%s`",
+		LangChinese:            "✅ 当前会话路径已切换为: `%s`",
+		LangTraditionalChinese: "✅ 目前會話路徑已切換為: `%s`",
+		LangJapanese:           "✅ セッションパスを `%s` に切り替えました",
+		LangSpanish:            "✅ La ruta de la sesión cambió a: `%s`",
+	},
+	MsgPathUsage: {
+		LangEnglish:            "Usage: `/path <absolute-path|reset>`",
+		LangChinese:            "用法: `/path <绝对路径|reset>`",
+		LangTraditionalChinese: "用法: `/path <絕對路徑|reset>`",
+		LangJapanese:           "使い方: `/path <絶対パス|reset>`",
+		LangSpanish:            "Uso: `/path <ruta-absoluta|reset>`",
 	},
 	MsgCardTitleProviderAdd: {
 		LangEnglish: "Add Provider", LangChinese: "添加服务商", LangTraditionalChinese: "新增服務商",

@@ -435,6 +435,12 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetDefaultAgentConfig(
+			proj.Agent.Type,
+			proj.Agent.Options,
+			providersFrom(&proj),
+			optionString(proj.Agent.Options, "provider"),
+		)
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
@@ -1789,6 +1795,12 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 			ps.SetActiveProvider(active)
 		}
 	}
+	engine.SetDefaultAgentConfig(
+		proj.Agent.Type,
+		proj.Agent.Options,
+		providersFrom(proj),
+		optionString(proj.Agent.Options, "provider"),
+	)
 
 	// Reload custom commands
 	engine.ClearCommands("config")
@@ -1867,6 +1879,27 @@ func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
 		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
 	}
 	return c
+}
+
+// providersFrom converts a project's provider list for the engine's default
+// agent config (used when /agent switches to an agent with its own providers).
+func providersFrom(proj *config.ProjectConfig) []core.ProviderConfig {
+	if proj == nil {
+		return nil
+	}
+	out := make([]core.ProviderConfig, 0, len(proj.Agent.Providers))
+	for i := range proj.Agent.Providers {
+		out = append(out, configProviderToCore(proj.Agent.Providers[i]))
+	}
+	return out
+}
+
+func optionString(opts map[string]any, key string) string {
+	if opts == nil {
+		return ""
+	}
+	v, _ := opts[key].(string)
+	return v
 }
 
 func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {

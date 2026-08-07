@@ -342,6 +342,12 @@ type Engine struct {
 	injectSender          bool
 	attachmentSendEnabled bool
 	startedAt             time.Time
+	// defaultAgent* holds the project-level agent config so session-scoped
+	// overrides (/agent, /path) can derive effective agents at session start.
+	defaultAgentType      string
+	defaultAgentOptions   map[string]any
+	defaultAgentProviders []ProviderConfig
+	defaultActiveProvider string
 
 	providerSaveFunc        func(providerName string) error
 	providerAddSaveFunc     func(p ProviderConfig) error
@@ -840,6 +846,190 @@ func (e *Engine) reapIdleWorkspaces() {
 // SetHooks configures the lifecycle event hook manager.
 func (e *Engine) SetHooks(hm *HookManager) {
 	e.hooks = hm
+}
+
+// SetDefaultAgentConfig stores the project-level agent config so session-scoped
+// overrides (/agent, /path) can derive effective agent/path settings later.
+func (e *Engine) SetDefaultAgentConfig(agentType string, options map[string]any, providers []ProviderConfig, activeProvider string) {
+	e.defaultAgentType = normalizeAgentName(agentType)
+	if len(options) > 0 {
+		e.defaultAgentOptions = make(map[string]any, len(options))
+		for k, v := range options {
+			e.defaultAgentOptions[k] = v
+		}
+	} else {
+		e.defaultAgentOptions = nil
+	}
+	if len(providers) > 0 {
+		e.defaultAgentProviders = append([]ProviderConfig(nil), providers...)
+	} else {
+		e.defaultAgentProviders = nil
+	}
+	e.defaultActiveProvider = activeProvider
+}
+
+// normalizeAgentName maps user-facing aliases to registered agent type names.
+func normalizeAgentName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude":
+		return "claudecode"
+	default:
+		return strings.ToLower(strings.TrimSpace(name))
+	}
+}
+
+func agentWorkDir(agent Agent) string {
+	if agent == nil {
+		return ""
+	}
+	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+		return wd.GetWorkDir()
+	}
+	return ""
+}
+
+func (e *Engine) defaultWorkDirFor(agent Agent) string {
+	if wd := agentWorkDir(agent); wd != "" {
+		return wd
+	}
+	if wd, ok := e.defaultAgentOptions["work_dir"].(string); ok && wd != "" {
+		return wd
+	}
+	return ""
+}
+
+func (e *Engine) defaultWorkDir() string {
+	return e.defaultWorkDirFor(e.agent)
+}
+
+func (e *Engine) effectiveAgentTypeFor(agent Agent, s *Session) string {
+	if s != nil {
+		if override := normalizeAgentName(s.GetAgentOverride()); override != "" {
+			return override
+		}
+	}
+	if agent != nil {
+		if agentType := normalizeAgentName(agent.Name()); agentType != "" {
+			return agentType
+		}
+	}
+	if agentType := normalizeAgentName(e.defaultAgentType); agentType != "" {
+		return agentType
+	}
+	return ""
+}
+
+func (e *Engine) effectiveAgentType(s *Session) string {
+	return e.effectiveAgentTypeFor(e.agent, s)
+}
+
+func (e *Engine) effectiveWorkDirFor(agent Agent, s *Session) string {
+	if s != nil {
+		if override := strings.TrimSpace(s.GetWorkDirOverride()); override != "" {
+			return override
+		}
+	}
+	return e.defaultWorkDirFor(agent)
+}
+
+func (e *Engine) effectiveWorkDir(s *Session) string {
+	return e.effectiveWorkDirFor(e.agent, s)
+}
+
+func cloneAgentOptions(opts map[string]any) map[string]any {
+	if len(opts) == 0 {
+		return make(map[string]any)
+	}
+	cloned := make(map[string]any, len(opts))
+	for k, v := range opts {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func cloneProviders(providers []ProviderConfig) []ProviderConfig {
+	if len(providers) == 0 {
+		return nil
+	}
+	return append([]ProviderConfig(nil), providers...)
+}
+
+func activeProviderName(agent Agent) string {
+	if ps, ok := agent.(ProviderSwitcher); ok {
+		if active := ps.GetActiveProvider(); active != nil {
+			return active.Name
+		}
+	}
+	return ""
+}
+
+// agentTypeOptions returns the per-agent-type override options declared under
+// [projects.agent.options.agents.<type>]. These are used by /agent switching so
+// each switchable backend gets its own model/mode/work_dir etc. instead of
+// inheriting the project's default (single-agent) options block.
+func (e *Engine) agentTypeOptions(agentType string) map[string]any {
+	agents, _ := e.defaultAgentOptions["agents"].(map[string]any)
+	if agents == nil {
+		return nil
+	}
+	opts, _ := agents[agentType].(map[string]any)
+	return opts
+}
+
+// buildSessionAgentFrom derives the agent that should run for a session by
+// applying session-scoped /agent and /path overrides on top of the base agent.
+// When no override is present it returns the base agent unchanged.
+func (e *Engine) buildSessionAgentFrom(baseAgent Agent, s *Session) (Agent, error) {
+	if s == nil {
+		return baseAgent, nil
+	}
+	agentOverride := normalizeAgentName(s.GetAgentOverride())
+	workDirOverride := strings.TrimSpace(s.GetWorkDirOverride())
+	if agentOverride == "" && workDirOverride == "" {
+		return baseAgent, nil
+	}
+
+	agentType := e.effectiveAgentTypeFor(baseAgent, s)
+	opts := cloneAgentOptions(e.defaultAgentOptions)
+	delete(opts, "agents")
+	if perType := e.agentTypeOptions(agentType); perType != nil {
+		for k, v := range perType {
+			opts[k] = v
+		}
+	}
+	if workDir := e.effectiveWorkDirFor(baseAgent, s); workDir != "" {
+		opts["work_dir"] = workDir
+	}
+
+	agent, err := CreateAgent(agentType, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Carry the base agent's provider set when switching so /provider choices
+	// keep working across the /agent switch.
+	if ps, ok := agent.(ProviderSwitcher); ok {
+		switch {
+		case baseAgent != nil:
+			if baseSwitcher, ok := baseAgent.(ProviderSwitcher); ok {
+				ps.SetProviders(cloneProviders(baseSwitcher.ListProviders()))
+				if active := activeProviderName(baseAgent); active != "" {
+					ps.SetActiveProvider(active)
+				}
+			}
+		case len(e.defaultAgentProviders) > 0:
+			ps.SetProviders(cloneProviders(e.defaultAgentProviders))
+			if e.defaultActiveProvider != "" {
+				ps.SetActiveProvider(e.defaultActiveProvider)
+			}
+		}
+	}
+
+	return agent, nil
+}
+
+func (e *Engine) buildSessionAgent(s *Session) (Agent, error) {
+	return e.buildSessionAgentFrom(e.agent, s)
 }
 
 // SetShell configures the shell binary, flag, and shell profile used for exec.
@@ -3989,6 +4179,15 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		agent = agentOverride
 	}
 
+	// Apply session-scoped /agent and /path overrides. buildSessionAgentFrom
+	// returns the base agent unchanged when no override is set; on a build
+	// error keep the base agent so the turn still works.
+	if built, err := e.buildSessionAgentFrom(agent, session); err == nil {
+		agent = built
+	} else {
+		slog.Error("failed to build session agent", "error", err, "session_key", sessionKey)
+	}
+
 	ccKey := sessionKey
 	if ccSessionKey != "" {
 		ccKey = ccSessionKey
@@ -6305,6 +6504,8 @@ var builtinCommands = []struct {
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
+	{[]string{"agent"}, "agent"},
+	{[]string{"path"}, "path"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"timer", "at", "remind"}, "timer"},
@@ -6519,6 +6720,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
+	case "path":
+		e.cmdPath(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
@@ -8347,6 +8552,150 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, successMsg)
+}
+
+// allowedAgentTypes lists the agent types a session may switch to via /agent.
+// Extends upstream's codex|claudecode allowlist with pi (fork feature); the
+// set is the registered agent types that make sense to multiplex on one bot.
+func allowedAgentTypes() []string {
+	return []string{"codex", "claudecode", "pi"}
+}
+
+func isAllowedAgentType(target string) bool {
+	for _, t := range allowedAgentTypes() {
+		if t == target {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdAgent views or switches the current session's agent type and optional
+// work dir. Usage: /agent [codex|claude|claudecode|pi|reset] [absolute-path]
+func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
+	baseAgent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	if len(args) == 0 {
+		currentPath := e.effectiveWorkDirFor(baseAgent, s)
+		if currentPath == "" {
+			currentPath = "-"
+		}
+		defaultPath := e.defaultWorkDirFor(baseAgent)
+		if defaultPath == "" {
+			defaultPath = "-"
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(
+			MsgAgentStatus,
+			e.effectiveAgentTypeFor(baseAgent, s),
+			currentPath,
+			normalizeAgentName(baseAgent.Name()),
+			defaultPath,
+		))
+		return
+	}
+	if len(args) > 2 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentUsage))
+		return
+	}
+
+	target := normalizeAgentName(args[0])
+	newPath := ""
+	if len(args) == 2 {
+		newPath, err = validateSessionWorkDirPath(args[1])
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, args[1]))
+			return
+		}
+	}
+
+	switch target {
+	case "reset":
+		target = ""
+	case "codex", "claudecode", "pi":
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentInvalid, args[0]))
+		return
+	}
+
+	s.SetAgentOverride(target)
+	if newPath != "" {
+		s.SetWorkDirOverride(newPath)
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChanged, e.effectiveAgentTypeFor(baseAgent, s)))
+}
+
+// cmdPath views or switches the current session's work dir. Usage: /path [absolute-path|reset]
+func (e *Engine) cmdPath(p Platform, msg *Message, args []string) {
+	baseAgent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	if len(args) == 0 {
+		currentPath := e.effectiveWorkDirFor(baseAgent, s)
+		if currentPath == "" {
+			currentPath = "-"
+		}
+		defaultPath := e.defaultWorkDirFor(baseAgent)
+		if defaultPath == "" {
+			defaultPath = "-"
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPathStatus, currentPath, defaultPath))
+		return
+	}
+	if len(args) != 1 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPathUsage))
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "reset":
+		s.SetWorkDirOverride("")
+	default:
+		path, err := validateSessionWorkDirPath(args[0])
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, args[0]))
+			return
+		}
+		s.SetWorkDirOverride(path)
+	}
+
+	e.cleanupInteractiveState(interactiveKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	sessions.Save()
+
+	currentPath := e.effectiveWorkDirFor(baseAgent, s)
+	if currentPath == "" {
+		currentPath = e.defaultWorkDirFor(baseAgent)
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPathChanged, currentPath))
+}
+
+func validateSessionWorkDirPath(input string) (string, error) {
+	path := strings.TrimSpace(input)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("path is not a directory")
+	}
+	return filepath.Clean(path), nil
 }
 
 // cmdSearch searches sessions by name or message content.
