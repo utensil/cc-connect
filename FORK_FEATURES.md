@@ -153,3 +153,20 @@ next turn starts fresh on the new agent.
 `TempDir RemoveAll cleanup: directory not empty` on macOS. Reproduces on clean
 `origin/dev` (fc22b8b) — unrelated to /agent switching. Run the failing tests
 in isolation (`-run 'TestCUJ'`) to confirm green.
+
+### `[projects.display]` applied at engine startup
+
+Upstream applies the project display config (`mode`, `thinking_messages`,
+`tool_messages`, …) only in the config-reload path. A fresh daemon start
+kept the engine default (full mode, thinking shown, cards edited), so a
+project with `mode = "quiet"` + `thinking_messages = false` still streamed
+thinking into an edited Discord message — notably for pi agents after an
+`/agent` switch — until a `/config` reload happened.
+
+The fork applies `SetDisplayConfig` from `config.EffectiveDisplay` at engine
+creation in `cmd/cc-connect/main.go`, mirroring the reload path.
+
+- Fork commit: [7c78177](https://github.com/utensil/cc-connect/commit/7c78177).
+- Provenance: not present upstream; written in this fork (2026-08-07).
+- Related: `/agent`/`/path` session switching entry above — this makes the
+  session-effective display behave correctly for switched agents.
