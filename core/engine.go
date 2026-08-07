@@ -1032,6 +1032,26 @@ func (e *Engine) buildSessionAgent(s *Session) (Agent, error) {
 	return e.buildSessionAgentFrom(e.agent, s)
 }
 
+// sessionAgentFor returns the effective agent for a session, applying /agent
+// and /path overrides on top of the base (project/workspace) agent. Commands
+// like /model, /mode, /reasoning, /provider and the display commands must use
+// it so they operate on the agent the session actually runs, not e.agent.
+func (e *Engine) sessionAgentFor(msg *Message, base Agent, sessions *SessionManager) Agent {
+	if sessions == nil || msg == nil {
+		return base
+	}
+	s := sessions.GetOrCreateActive(msg.SessionKey)
+	if s.GetAgentOverride() == "" && s.GetWorkDirOverride() == "" {
+		return base
+	}
+	built, err := e.buildSessionAgentFrom(base, s)
+	if err != nil {
+		slog.Error("sessionAgentFor: failed to build session agent", "error", err, "session_key", msg.SessionKey)
+		return base
+	}
+	return built
+}
+
 // SetShell configures the shell binary, flag, and shell profile used for exec.
 func (e *Engine) SetShell(shell, flag, shellProfile string) {
 	e.shell = shell
@@ -8850,9 +8870,10 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
 		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
+		agent = e.sessionAgentFor(msg, agent, sessions)
 		s := sessions.GetOrCreateActive(msg.SessionKey)
 		agentID := s.GetAgentSessionID()
 		if agentID == "" {
@@ -8873,6 +8894,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
+		agent = e.sessionAgentFor(msg, agent, sessions)
 		platNames := make([]string, len(e.platforms))
 		for i, pl := range e.platforms {
 			platNames[i] = pl.Name()
@@ -9896,6 +9918,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
+	agent = e.sessionAgentFor(msg, agent, sessions)
 
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
@@ -10139,6 +10162,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
+	agent = e.sessionAgentFor(msg, agent, sessions)
 
 	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
@@ -10228,11 +10252,12 @@ func (e *Engine) reasoningUsage(efforts []string) string {
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
-	agent, _, _, err := e.commandContext(p, msg)
+	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
+	agent = e.sessionAgentFor(msg, agent, sessions)
 
 	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
@@ -10958,6 +10983,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
+	agent = e.sessionAgentFor(msg, agent, sessions)
 
 	switcher, ok := agent.(ProviderSwitcher)
 	if !ok {

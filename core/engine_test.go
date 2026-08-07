@@ -16978,3 +16978,32 @@ func TestCmdAgent_StatusShowsCurrentAgent(t *testing.T) {
 		t.Fatalf("status reply = %q, want current agent pi", p.sent)
 	}
 }
+
+func TestCmdModel_UsesSessionEffectiveAgent(t *testing.T) {
+	const testAgentType = "testmodelagent"
+	RegisterAgent(testAgentType, func(opts map[string]any) (Agent, error) {
+		return &stubModelModeAgent{model: "test-session-model"}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	base := &stubModelModeAgent{model: "codex-default"}
+	e := NewEngine("test", base, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{}, nil, "")
+
+	// Switch the session to the test agent type (direct override; the /agent
+	// allowlist is exercised by TestCmdAgent_SetsSessionOverride).
+	s := e.sessions.GetOrCreateActive("test:user1")
+	s.SetAgentOverride(testAgentType)
+
+	e.cmdModel(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) == 0 {
+		t.Fatal("expected /model reply")
+	}
+	if !strings.Contains(p.sent[0], "test-session-model") {
+		t.Fatalf("/model reply = %q, want session-effective model test-session-model", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "codex-default") {
+		t.Fatalf("/model reply = %q, must not show base agent model codex-default", p.sent[0])
+	}
+}
