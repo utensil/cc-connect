@@ -442,8 +442,22 @@ func main() {
 			optionString(proj.Agent.Options, "provider"),
 		)
 		// Wire display settings including show_context_indicator and reply_footer
-		// Global [display] config can be overridden by project-level settings
-		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
+		// Global [display] config can be overridden by project-level settings.
+		// Full display config must be applied at startup too — the reload path
+		// applies it, but a fresh daemon start otherwise keeps the engine
+		// default (full mode, thinking shown), ignoring [projects.display].
+		mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
+		historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
+		engine.SetDisplayConfig(core.DisplayCfg{
+			Mode:             mode,
+			CardMode:         config.EffectiveCardMode(cfg, &proj),
+			ThinkingMessages: tm,
+			ThinkingMaxLen:   tmlen,
+			ToolMaxLen:       toollen,
+			ToolMessages:     tool,
+			HistoryMaxLen:    &historyMaxLen,
+			HideAgentFooter:  hideAgentFooter,
+		})
 		engine.SetShowContextIndicator(showCtx)
 		showWorkdir := true
 		if proj.ShowWorkdirIndicator != nil {
