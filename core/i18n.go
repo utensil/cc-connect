@@ -239,6 +239,8 @@ const (
 	MsgProviderRemoveFailed      MsgKey = "provider_remove_failed"
 	MsgAgentStatus              MsgKey = "agent_status"
 	MsgAgentChanged             MsgKey = "agent_changed"
+	MsgAgentChangedWithModel    MsgKey = "agent_changed_with_model"
+	MsgAgentChangedWithModelReasoning MsgKey = "agent_changed_with_model_reasoning"
 	MsgAgentUsage               MsgKey = "agent_usage"
 	MsgAgentInvalid             MsgKey = "agent_invalid"
 	MsgPathStatus               MsgKey = "path_status"
@@ -1635,12 +1637,26 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "✅ セッション Agent を `%s` に切り替えました",
 		LangSpanish:            "✅ El agente de la sesión cambió a: `%s`",
 	},
+	MsgAgentChangedWithModel: {
+		LangEnglish:            "✅ Session agent set to: `%s` · model `%s`",
+		LangChinese:            "✅ 当前会话 Agent 已切换为: `%s` · 模型 `%s`",
+		LangTraditionalChinese: "✅ 目前會話 Agent 已切換為: `%s` · 模型 `%s`",
+		LangJapanese:           "✅ セッション Agent を `%s` に切り替えました · モデル `%s`",
+		LangSpanish:            "✅ El agente de la sesión cambió a: `%s` · modelo `%s`",
+	},
+	MsgAgentChangedWithModelReasoning: {
+		LangEnglish:            "✅ Session agent set to: `%s` · model `%s` · reasoning `%s`",
+		LangChinese:            "✅ 当前会话 Agent 已切换为: `%s` · 模型 `%s` · 推理强度 `%s`",
+		LangTraditionalChinese: "✅ 目前會話 Agent 已切換為: `%s` · 模型 `%s` · 推理強度 `%s`",
+		LangJapanese:           "✅ セッション Agent を `%s` に切り替えました · モデル `%s` · 推論強度 `%s`",
+		LangSpanish:            "✅ El agente de la sesión cambió a: `%s` · modelo `%s` · razonamiento `%s`",
+	},
 	MsgAgentUsage: {
-		LangEnglish:            "Usage: `/agent <codex|claude|claudecode|pi|reset> [absolute-path]`",
-		LangChinese:            "用法: `/agent <codex|claude|claudecode|pi|reset> [绝对路径]`",
-		LangTraditionalChinese: "用法: `/agent <codex|claude|claudecode|pi|reset> [絕對路徑]`",
-		LangJapanese:           "使い方: `/agent <codex|claude|claudecode|pi|reset> [絶対パス]`",
-		LangSpanish:            "Uso: `/agent <codex|claude|claudecode|pi|reset> [ruta-absoluta]`",
+		LangEnglish:            "Usage: `/agent <codex|claude|claudecode|pi|reset> [absolute-path] [model] [reasoning]`",
+		LangChinese:            "用法: `/agent <codex|claude|claudecode|pi|reset> [绝对路径] [模型] [推理]`",
+		LangTraditionalChinese: "用法: `/agent <codex|claude|claudecode|pi|reset> [絕對路徑] [模型] [推理]`",
+		LangJapanese:           "使い方: `/agent <codex|claude|claudecode|pi|reset> [絶対パス] [モデル] [推論]`",
+		LangSpanish:            "Uso: `/agent <codex|claude|claudecode|pi|reset> [ruta-absoluta] [modelo] [razonamiento]`",
 	},
 	MsgAgentInvalid: {
 		LangEnglish:            "❌ Invalid agent: `%s`. Allowed: `codex`, `claude`, `claudecode`, `pi`, `reset`",

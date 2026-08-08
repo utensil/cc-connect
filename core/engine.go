@@ -8617,21 +8617,12 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 		))
 		return
 	}
-	if len(args) > 2 {
+	if len(args) > 4 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAgentUsage))
 		return
 	}
 
 	target := normalizeAgentName(args[0])
-	newPath := ""
-	if len(args) == 2 {
-		newPath, err = validateSessionWorkDirPath(args[1])
-		if err != nil {
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, args[1]))
-			return
-		}
-	}
-
 	switch target {
 	case "reset":
 		target = ""
@@ -8641,9 +8632,92 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	// Parse optional [path] [model] [reasoning]. Path is arg[1] when it is an
+	// absolute path; otherwise arg[1] is a model name (bare form).
+	newPath := ""
+	modelArg := ""
+	reasoningArg := ""
+	rest := args[1:]
+	if len(rest) > 0 {
+		if isAbsolutePathArg(rest[0]) {
+			newPath, err = validateSessionWorkDirPath(rest[0])
+			if err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, rest[0]))
+				return
+			}
+			rest = rest[1:]
+		}
+	}
+	if len(rest) > 0 {
+		modelArg = rest[0]
+		rest = rest[1:]
+	}
+	if len(rest) > 0 {
+		reasoningArg = rest[0]
+	}
+
+	// Resolve the target agent so model/reasoning validate against it, not the
+	// project default. Validate on a TEMPORARY session first — if model or
+	// reasoning is invalid, the real session is left untouched (atomic). Only
+	// build when we actually need the switcher interfaces; a plain `/agent`
+	// switch (no model/reasoning) must not depend on agent registration.
+	effectiveAgent := baseAgent
+	if modelArg != "" || reasoningArg != "" {
+		tmpS := &Session{}
+		tmpS.SetAgentOverride(target)
+		if newPath != "" {
+			tmpS.SetWorkDirOverride(newPath)
+		}
+		var buildErr error
+		effectiveAgent, buildErr = e.buildSessionAgentFrom(baseAgent, tmpS)
+		if buildErr != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, buildErr))
+			return
+		}
+	}
+
+	// Validate model + reasoning BEFORE applying anything (atomic: bad input
+	// leaves the agent switch untouched).
+	modelTarget := ""
+	if modelArg != "" {
+		switcher, ok := effectiveAgent.(ModelSwitcher)
+		if !ok {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
+			return
+		}
+		modelTarget = strings.TrimSpace(modelArg)
+		if modelSwitchNeedsLookup(modelTarget) {
+			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+			models := switcher.AvailableModels(fetchCtx)
+			modelTarget = resolveModelSwitchTarget(modelTarget, models)
+			cancel()
+		}
+	}
+	reasoningTarget := ""
+	if reasoningArg != "" {
+		if _, ok := effectiveAgent.(ReasoningEffortSwitcher); !ok {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
+			return
+		}
+		reasoningTarget = resolveReasoningTarget(effectiveAgent, reasoningArg)
+		if reasoningTarget == "" {
+			if rs, ok := effectiveAgent.(ReasoningEffortSwitcher); ok {
+				e.reply(p, msg.ReplyCtx, e.reasoningUsage(rs.AvailableReasoningEfforts()))
+			}
+			return
+		}
+	}
+
+	// Validation passed — now mutate the real session.
 	s.SetAgentOverride(target)
 	if newPath != "" {
 		s.SetWorkDirOverride(newPath)
+	}
+	if modelTarget != "" {
+		s.SetModelOverride(modelTarget)
+	}
+	if reasoningTarget != "" {
+		e.applyReasoningEffort(effectiveAgent, sessions, msg.SessionKey, reasoningTarget)
 	}
 
 	e.cleanupInteractiveState(interactiveKey)
@@ -8651,7 +8725,24 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 	s.ClearHistory()
 	sessions.Save()
 
+	if modelTarget != "" && reasoningTarget != "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChangedWithModelReasoning,
+			e.effectiveAgentTypeFor(baseAgent, s), modelTarget, reasoningTarget))
+		return
+	}
+	if modelTarget != "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChangedWithModel,
+			e.effectiveAgentTypeFor(baseAgent, s), modelTarget))
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentChanged, e.effectiveAgentTypeFor(baseAgent, s)))
+}
+
+// isAbsolutePathArg reports whether an arg is an absolute path (starts with /
+// or ~) as opposed to a model name.
+func isAbsolutePathArg(arg string) bool {
+	a := strings.TrimSpace(arg)
+	return strings.HasPrefix(a, "/") || strings.HasPrefix(a, "~")
 }
 
 // cmdPath views or switches the current session's work dir. Usage: /path [absolute-path|reset]

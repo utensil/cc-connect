@@ -151,6 +151,26 @@ next turn starts fresh on the new agent.
   ("Multi-Agent Switching Within the Same Project").
 - Fork PR: (this feature's PR) — see the pull request that landed this entry.
 
+### Combined `/agent <type> [path] [model] [reasoning]`
+
+`/agent` accepts optional trailing `[model] [reasoning]` args so agent, model,
+and reasoning switch in one command: `/agent <codex|claudecode|pi> [path]
+[model] [reasoning]`. Arg[1] is treated as an absolute path when it starts
+with `/` or `~`; otherwise it is a model name (bare form), so both
+`/agent pi /path model reasoning` and `/agent pi model reasoning` work.
+
+- Model and reasoning are validated against the *target* agent (built from
+  the requested type) BEFORE anything is applied; invalid input rejects the
+  whole command — the session's agent/path/model overrides stay untouched.
+- On success, `agent_override`, optional `work_dir_override`, and optional
+  `model_override` + reasoning effort are all applied to the session row
+  (persist across `/switch` under `thread_isolation`).
+- Fork commits: this PR (core/engine.go `cmdAgent` + `isAbsolutePathArg`;
+  i18n keys `agent_changed_with_model`, `agent_changed_with_model_reasoning`).
+- Provenance: not present upstream; written in this fork (2026-08-08).
+- Related: `Combined /model <model> <reasoning>` entry above — `/agent` now
+  subsumes it for the switch case; `/model` remains for model-only changes.
+
 ### Combined `/model <model> <reasoning>`
 
 `/model` accepts an optional trailing reasoning effort so model + reasoning

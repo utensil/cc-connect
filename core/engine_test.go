@@ -16934,6 +16934,52 @@ func TestCmdAgent_SetsSessionOverride(t *testing.T) {
 	}
 }
 
+func TestCmdAgent_WithModelAndReasoning(t *testing.T) {
+	RegisterAgent("pi", func(opts map[string]any) (Agent, error) {
+		return &stubModelModeAgent{}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/tmp"}, nil, "")
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"},
+		[]string{"pi", "gpt-4.1", "high"})
+
+	s := e.sessions.GetOrCreateActive("test:user1")
+	if got := s.GetAgentOverride(); got != "pi" {
+		t.Fatalf("agent override = %q, want pi", got)
+	}
+	if got := s.GetModelOverride(); got != "gpt-4.1" {
+		t.Fatalf("model override = %q, want gpt-4.1", got)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "gpt-4.1") || !strings.Contains(p.sent[0], "high") {
+		t.Fatalf("reply = %q, want it to mention model and reasoning", p.sent)
+	}
+}
+
+func TestCmdAgent_InvalidReasoningRejectsWholeCommand(t *testing.T) {
+	RegisterAgent("pi", func(opts map[string]any) (Agent, error) {
+		return &stubModelModeAgent{}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDefaultAgentConfig("codex", map[string]any{"work_dir": "/tmp"}, nil, "")
+
+	e.cmdAgent(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"},
+		[]string{"pi", "gpt-4.1", "bogus-effort"})
+
+	s := e.sessions.GetOrCreateActive("test:user1")
+	if got := s.GetAgentOverride(); got != "" {
+		t.Fatalf("agent override = %q, want empty after invalid reasoning", got)
+	}
+	if got := s.GetModelOverride(); got != "" {
+		t.Fatalf("model override = %q, want empty after invalid reasoning", got)
+	}
+}
+
 func TestCmdAgent_RejectsUnknownAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)
