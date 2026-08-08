@@ -307,6 +307,8 @@ const (
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelSessionChanged   MsgKey = "model_session_changed"
+	MsgModelChangedWithReasoning   MsgKey = "model_changed_with_reasoning"
+	MsgModelSessionChangedWithReasoning MsgKey = "model_session_changed_with_reasoning"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
 	MsgModelCardSwitching    MsgKey = "model_card_switching"
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
@@ -2299,6 +2301,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "このセッションのモデルを `%s` に設定しました。新しいセッションはデフォルトモデルのままです。",
 		LangSpanish:            "El modelo de esta sesión se estableció en `%s`. Las nuevas sesiones mantienen el modelo predeterminado.",
 	},
+	MsgModelChangedWithReasoning: {
+		LangEnglish:            "Default model set to `%s`; reasoning `%s` for this session.",
+		LangChinese:            "默认模型已设为 `%s`；当前会话推理强度 `%s`。",
+		LangTraditionalChinese: "預設模型已設為 `%s`；目前工作階段推理強度 `%s`。",
+		LangJapanese:           "デフォルトモデルを `%s` に設定。このセッションの推論強度は `%s` です。",
+		LangSpanish:            "Modelo predeterminado establecido en `%s`; razonamiento `%s` para esta sesión.",
+	},
+	MsgModelSessionChangedWithReasoning: {
+		LangEnglish:            "Model `%s` with reasoning `%s` set for this session.",
+		LangChinese:            "当前会话已设置为模型 `%s`、推理强度 `%s`。",
+		LangTraditionalChinese: "目前工作階段已設定為模型 `%s`、推理強度 `%s`。",
+		LangJapanese:           "このセッションにモデル `%s`、推論強度 `%s` を設定しました。",
+		LangSpanish:            "Modelo `%s` con razonamiento `%s` establecido para esta sesión.",
+	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",
 		LangChinese:            "❌ 切换模型失败: %v",
@@ -2595,11 +2611,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelos disponibles:\n",
 	},
 	MsgModelUsage: {
-		LangEnglish:            "Usage: `/model <model>` changes this session only. Use `/model default <model>` for new sessions.",
-		LangChinese:            "用法: `/model <模型>` 仅切换当前会话。使用 `/model default <模型>` 设置新会话默认模型。",
-		LangTraditionalChinese: "用法: `/model <模型>` 僅切換目前工作階段。使用 `/model default <模型>` 設定新工作階段預設模型。",
-		LangJapanese:           "使い方: `/model <モデル>` はこのセッションだけを切り替えます。新しいセッションには `/model default <モデル>` を使います。",
-		LangSpanish:            "Uso: `/model <modelo>` cambia solo esta sesión. Usa `/model default <modelo>` para sesiones nuevas.",
+		LangEnglish:            "Usage: `/model <model>` changes this session only. Use `/model default <model>` for new sessions. Add a trailing reasoning effort to set both: `/model <model> <reasoning>`.",
+		LangChinese:            "用法: `/model <模型>` 仅切换当前会话。使用 `/model default <模型>` 设置新会话默认模型。追加推理强度可一次设置两者: `/model <模型> <推理>`。",
+		LangTraditionalChinese: "用法: `/model <模型>` 僅切換目前工作階段。使用 `/model default <模型>` 設定新工作階段預設模型。追加推理強度可一次設定兩者: `/model <模型> <推理>`。",
+		LangJapanese:           "使い方: `/model <モデル>` はこのセッションだけを切り替えます。新しいセッションには `/model default <モデル>` を使います。末尾に推論強度を付けると同時設定: `/model <モデル> <推論>`。",
+		LangSpanish:            "Uso: `/model <modelo>` cambia solo esta sesión. Usa `/model default <modelo>` para sesiones nuevas. Añade un esfuerzo de razonamiento al final para fijar ambos: `/model <modelo> <razonamiento>`.",
 	},
 	MsgReasoningDefault: {
 		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",

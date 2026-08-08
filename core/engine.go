@@ -9989,7 +9989,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	targetInput, setDefault, ok := parseModelSwitchArgs(args)
+	targetInput, setDefault, reasoningArg, ok := parseModelSwitchArgs(args)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelUsage))
 		return
@@ -10001,6 +10001,22 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		defer cancel()
 		models := switcher.AvailableModels(fetchCtx)
 		target = resolveModelSwitchTarget(target, models)
+	}
+
+	// Optional trailing reasoning arg (fork extension): `/model <model> <reasoning>`
+	// sets both in one command. Validate before applying either.
+	reasoningTarget := ""
+	if reasoningArg != "" {
+		rSwitcher, isReasoning := agent.(ReasoningEffortSwitcher)
+		if !isReasoning {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
+			return
+		}
+		reasoningTarget = resolveReasoningTarget(agent, reasoningArg)
+		if reasoningTarget == "" {
+			e.reply(p, msg.ReplyCtx, e.reasoningUsage(rSwitcher.AvailableReasoningEfforts()))
+			return
+		}
 	}
 
 	if setDefault {
@@ -10018,6 +10034,11 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		}
 		e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
 		sessions.Save()
+		if reasoningTarget != "" {
+			e.applyReasoningEffort(agent, sessions, msg.SessionKey, reasoningTarget)
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangedWithReasoning, target, reasoningTarget))
+			return
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 		return
 	}
@@ -10030,6 +10051,11 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	sessions.Save()
 	if !e.applyLiveModelChange(msg.SessionKey, target) {
 		e.cleanupInteractiveState(interactiveKey)
+	}
+	if reasoningTarget != "" {
+		e.applyReasoningEffort(agent, sessions, msg.SessionKey, reasoningTarget)
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelSessionChangedWithReasoning, target, reasoningTarget))
+		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelSessionChanged, target))
 }
@@ -10073,29 +10099,48 @@ func modelSwitchNeedsLookup(input string) bool {
 	return !strings.Contains(input, "/")
 }
 
-func parseModelSwitchArgs(args []string) (target string, setDefault bool, ok bool) {
+func parseModelSwitchArgs(args []string) (target string, setDefault bool, reasoning string, ok bool) {
 	if len(args) == 1 {
 		target = strings.TrimSpace(args[0])
 		switch strings.ToLower(target) {
 		case "default", "session", "switch":
-			return "", false, false
+			return "", false, "", false
 		}
-		return target, false, target != ""
+		return target, false, "", target != ""
 	}
-	if len(args) != 2 {
-		return "", false, false
-	}
-	target = strings.TrimSpace(args[1])
-	if target == "" {
-		return "", false, false
-	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "default":
-		return target, true, true
-	case "session", "switch":
-		return target, false, true
+	arg0 := strings.ToLower(strings.TrimSpace(args[0]))
+	switch arg0 {
+	case "default", "session", "switch":
+		// Subcommand form: [default|session|switch] <model> [<reasoning>]
+		if len(args) < 2 {
+			return "", false, "", false
+		}
+		target = strings.TrimSpace(args[1])
+		if target == "" {
+			return "", false, "", false
+		}
+		if len(args) == 3 {
+			reasoning = strings.TrimSpace(args[2])
+		} else if len(args) > 3 {
+			return "", false, "", false
+		}
+		if arg0 == "default" {
+			return target, true, reasoning, true
+		}
+		return target, false, reasoning, true
 	default:
-		return "", false, false
+		// Bare form: <model> [<reasoning>]
+		if len(args) > 2 {
+			return "", false, "", false
+		}
+		target = strings.TrimSpace(args[0])
+		if target == "" {
+			return "", false, "", false
+		}
+		if len(args) == 2 {
+			reasoning = strings.TrimSpace(args[1])
+		}
+		return target, false, reasoning, true
 	}
 }
 
@@ -10216,35 +10261,57 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	efforts := switcher.AvailableReasoningEfforts()
-	target := strings.ToLower(strings.TrimSpace(args[0]))
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
-		target = efforts[idx-1]
-	}
-
-	valid := false
-	for _, effort := range efforts {
-		if effort == target {
-			valid = true
-			break
-		}
-	}
-	if !valid {
+	target := resolveReasoningTarget(agent, args[0])
+	if target == "" {
 		e.reply(p, msg.ReplyCtx, e.reasoningUsage(efforts))
 		return
 	}
 
-	switcher.SetReasoningEffort(target)
-	appliedLive := e.applyLiveReasoningEffortChange(msg.SessionKey, target)
-	preserved := appliedLive || preservesSessionOnReasoningEffortChange(agent)
-	if !preserved {
-		e.resetSessionForReasoningChange(msg.SessionKey, sessions)
-	}
+	preserved := e.applyReasoningEffort(agent, sessions, msg.SessionKey, target)
 
 	msgKey := MsgReasoningChanged
 	if preserved {
 		msgKey = MsgReasoningChangedLive
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(msgKey, target))
+}
+
+// applyReasoningEffort validates and applies a reasoning effort to the session.
+// Returns true if the session survived (live change or agent preserves session),
+// false if the session was reset for the new effort. Shared by /reasoning and the
+// combined /model <model> <reasoning> form.
+func (e *Engine) applyReasoningEffort(agent Agent, sessions *SessionManager, sessionKey, target string) bool {
+	switcher, ok := agent.(ReasoningEffortSwitcher)
+	if !ok {
+		return false
+	}
+	switcher.SetReasoningEffort(target)
+	appliedLive := e.applyLiveReasoningEffortChange(sessionKey, target)
+	preserved := appliedLive || preservesSessionOnReasoningEffortChange(agent)
+	if !preserved {
+		e.resetSessionForReasoningChange(sessionKey, sessions)
+	}
+	return preserved
+}
+
+// resolveReasoningTarget normalizes a reasoning arg (name or 1-based index)
+// against the agent's available efforts. Returns the canonical name or "".
+func resolveReasoningTarget(agent Agent, arg string) string {
+	switcher, ok := agent.(ReasoningEffortSwitcher)
+	if !ok {
+		return ""
+	}
+	efforts := switcher.AvailableReasoningEfforts()
+	target := strings.ToLower(strings.TrimSpace(arg))
+	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(efforts) {
+		target = efforts[idx-1]
+	}
+	for _, effort := range efforts {
+		if effort == target {
+			return target
+		}
+	}
+	return ""
 }
 
 func (e *Engine) reasoningUsage(efforts []string) string {
@@ -12550,7 +12617,7 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		return e.simpleCard(e.i18n.T(MsgCardTitleModel), "indigo", e.i18n.T(MsgModelNotSupported))
 	}
 
-	target, setDefault, ok := parseModelSwitchArgs(strings.Fields(args))
+	target, setDefault, _, ok := parseModelSwitchArgs(strings.Fields(args))
 	if !ok || setDefault {
 		return e.renderModelCard(sessionKey)
 	}
@@ -12626,7 +12693,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
-		target, setDefault, ok := parseModelSwitchArgs(strings.Fields(args))
+		target, setDefault, _, ok := parseModelSwitchArgs(strings.Fields(args))
 		if !ok || setDefault {
 			cancel()
 			return

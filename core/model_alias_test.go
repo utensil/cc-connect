@@ -26,6 +26,7 @@ func TestParseModelSwitchArgs(t *testing.T) {
 		args         []string
 		want         string
 		defaultScope bool
+		wantReason   string
 		ok           bool
 	}{
 		{name: "bare session syntax", args: []string{"gpt"}, want: "gpt", ok: true},
@@ -33,12 +34,16 @@ func TestParseModelSwitchArgs(t *testing.T) {
 		{name: "switch syntax", args: []string{"switch", "gpt"}, want: "gpt", ok: true},
 		{name: "default syntax", args: []string{"default", "gpt"}, want: "gpt", defaultScope: true, ok: true},
 		{name: "missing switch target", args: []string{"switch"}, ok: false},
-		{name: "unknown subcommand", args: []string{"list", "gpt"}, ok: false},
+		{name: "unknown subcommand", args: []string{"list", "gpt"}, want: "list", wantReason: "gpt", ok: true},
+		{name: "bare model + reasoning", args: []string{"gpt", "high"}, want: "gpt", wantReason: "high", ok: true},
+		{name: "session model + reasoning", args: []string{"session", "gpt", "medium"}, want: "gpt", wantReason: "medium", ok: true},
+		{name: "default model + reasoning", args: []string{"default", "gpt", "low"}, want: "gpt", defaultScope: true, wantReason: "low", ok: true},
+		{name: "too many args", args: []string{"session", "gpt", "high", "extra"}, ok: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, defaultScope, ok := parseModelSwitchArgs(tt.args)
+			got, defaultScope, reasoning, ok := parseModelSwitchArgs(tt.args)
 			if ok != tt.ok {
 				t.Fatalf("parseModelSwitchArgs() ok = %v, want %v", ok, tt.ok)
 			}
@@ -47,6 +52,9 @@ func TestParseModelSwitchArgs(t *testing.T) {
 			}
 			if defaultScope != tt.defaultScope {
 				t.Fatalf("parseModelSwitchArgs() defaultScope = %v, want %v", defaultScope, tt.defaultScope)
+			}
+			if reasoning != tt.wantReason {
+				t.Fatalf("parseModelSwitchArgs() reasoning = %q, want %q", reasoning, tt.wantReason)
 			}
 		})
 	}

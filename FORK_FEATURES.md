@@ -151,6 +151,27 @@ next turn starts fresh on the new agent.
   ("Multi-Agent Switching Within the Same Project").
 - Fork PR: (this feature's PR) — see the pull request that landed this entry.
 
+### Combined `/model <model> <reasoning>`
+
+`/model` accepts an optional trailing reasoning effort so model + reasoning
+switch in one command: `/model <model> <reasoning>`, `/model session <model>
+<reasoning>`, `/model default <model> <reasoning>`. The reasoning effort is
+validated against the session agent's `AvailableReasoningEfforts()` before
+anything is applied; if invalid, the whole command is rejected (model
+unchanged). Both changes are per-session overrides like the plain `/model`.
+
+- Fork commits: this PR (core/engine.go `parseModelSwitchArgs` +
+  `applyReasoningEffort`/`resolveReasoningTarget` helpers + i18n keys
+  `model_changed_with_reasoning`, `model_session_changed_with_reasoning`).
+- Refactor: `cmdReasoning` now shares `applyReasoningEffort` /
+  `resolveReasoningTarget` with `cmdModel` — one validation + application
+  path for reasoning effort.
+- Provenance: not present upstream; written in this fork (2026-08-08).
+- Related: `/agent`/`/path` session switching entry above — this extends the
+  same session-scoped switching surface so `/agent pi` + `/model <model>
+  <reasoning>` sets agent, model, and reasoning in two commands instead of
+  three.
+
 ### Pre-existing full-suite test flakiness on macOS
 
 `go test -race ./core` (full suite) intermittently fails
