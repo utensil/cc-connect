@@ -707,6 +707,290 @@ func TestAppServerSession_FailedTurnCompletionEmitsError(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_CapacityFailureContinuesSameThread(t *testing.T) {
+	var s *appServerSession
+	var mu sync.Mutex
+	var turnStarts []map[string]any
+	secondStart := make(chan struct{})
+	var secondStartOnce sync.Once
+
+	stdin := &callbackWriteCloser{onWrite: func(p []byte) {
+		var request map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(p), &request); err != nil {
+			panic(fmt.Sprintf("decode request: %v", err))
+		}
+		method, _ := request["method"].(string)
+		if method != "turn/start" {
+			panic(fmt.Sprintf("method = %q, want turn/start", method))
+		}
+		params, _ := request["params"].(map[string]any)
+		mu.Lock()
+		turnStarts = append(turnStarts, params)
+		turnStartCount := len(turnStarts)
+		mu.Unlock()
+
+		id := int64(request["id"].(float64))
+		if turnStartCount == 1 {
+			s.handleResponse(rpcResponseEnvelope{ID: id, Error: &rpcError{Message: "Selected model is at capacity. Please try a different model."}})
+			return
+		}
+		if turnStartCount != 2 {
+			panic(fmt.Sprintf("turn/start count = %d, want at most 2", turnStartCount))
+		}
+		s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{"turn":{"id":"turn-2"}}`)})
+		secondStartOnce.Do(func() { close(secondStart) })
+	}}
+	s = newScriptedAppServerSession(t, stdin)
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+	s.capacityRetryDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { _ = s.Close() })
+
+	notifyAppServerTest(t, s, "turn/completed", map[string]any{
+		"threadId": "thread-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error":  map[string]any{"message": "Selected model is at capacity. Please try a different model."},
+		},
+	})
+
+	select {
+	case <-secondStart:
+	case <-time.After(time.Second):
+		t.Fatal("capacity retry did not start a continuation turn")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.stateMu.Lock()
+		currentTurn := s.currentTurn
+		s.stateMu.Unlock()
+		if currentTurn == "turn-2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("currentTurn = %q, want turn-2", currentTurn)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	if len(turnStarts) != 2 {
+		mu.Unlock()
+		t.Fatalf("turn/start requests = %d, want 2", len(turnStarts))
+	}
+	for i, params := range turnStarts {
+		if got := params["threadId"]; got != "thread-1" {
+			mu.Unlock()
+			t.Fatalf("turn/start[%d].threadId = %#v, want same thread", i, got)
+		}
+		input, ok := params["input"].([]any)
+		if !ok || len(input) != 1 {
+			mu.Unlock()
+			t.Fatalf("turn/start[%d].input = %#v, want one continuation message", i, params["input"])
+		}
+		item, ok := input[0].(map[string]any)
+		if !ok || item["text"] != codexCapacityContinuationPrompt {
+			mu.Unlock()
+			t.Fatalf("turn/start[%d].input = %#v, want continuation prompt", i, input)
+		}
+	}
+	mu.Unlock()
+
+	notifyAppServerTest(t, s, "turn/completed", map[string]any{
+		"threadId": "thread-1",
+		"turn":     map[string]any{"id": "turn-2", "status": "completed"},
+	})
+
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventResult || !event.Done {
+			t.Fatalf("event = %#v, want completed result", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("continuation completion did not emit a result")
+	}
+	if !s.Alive() {
+		t.Fatal("session marked dead after a capacity retry")
+	}
+}
+
+func TestAppServerSession_SendRetriesInitialCapacityWithOriginalInput(t *testing.T) {
+	var s *appServerSession
+	var mu sync.Mutex
+	var turnStarts []map[string]any
+	secondStart := make(chan struct{})
+
+	stdin := &callbackWriteCloser{onWrite: func(p []byte) {
+		var request map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(p), &request); err != nil {
+			panic(fmt.Sprintf("decode request: %v", err))
+		}
+		params, _ := request["params"].(map[string]any)
+		mu.Lock()
+		turnStarts = append(turnStarts, params)
+		turnStartCount := len(turnStarts)
+		mu.Unlock()
+
+		id := int64(request["id"].(float64))
+		if turnStartCount == 1 {
+			s.handleResponse(rpcResponseEnvelope{ID: id, Error: &rpcError{Message: "Selected model is at capacity. Please try a different model."}})
+			return
+		}
+		if turnStartCount != 2 {
+			panic(fmt.Sprintf("turn/start count = %d, want at most 2", turnStartCount))
+		}
+		s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{"turn":{"id":"turn-2"}}`)})
+		close(secondStart)
+	}}
+	s = newScriptedAppServerSession(t, stdin)
+	s.threadID.Store("thread-1")
+	s.capacityRetryDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := s.Send("review the retry path", nil, nil); err != nil {
+		t.Fatalf("Send() error = %v, want capacity retry to stay active", err)
+	}
+	select {
+	case <-secondStart:
+	case <-time.After(time.Second):
+		t.Fatal("initial capacity retry did not start a replacement turn")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.stateMu.Lock()
+		currentTurn := s.currentTurn
+		s.stateMu.Unlock()
+		if currentTurn == "turn-2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("currentTurn = %q, want turn-2", currentTurn)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	if len(turnStarts) != 2 {
+		mu.Unlock()
+		t.Fatalf("turn/start requests = %d, want 2", len(turnStarts))
+	}
+	for i, params := range turnStarts {
+		if got := params["threadId"]; got != "thread-1" {
+			mu.Unlock()
+			t.Fatalf("turn/start[%d].threadId = %#v, want same thread", i, got)
+		}
+		input, ok := params["input"].([]any)
+		if !ok || len(input) != 1 {
+			mu.Unlock()
+			t.Fatalf("turn/start[%d].input = %#v, want original message", i, params["input"])
+		}
+		item, ok := input[0].(map[string]any)
+		if !ok || item["text"] != "review the retry path" {
+			mu.Unlock()
+			t.Fatalf("turn/start[%d].input = %#v, want original message", i, input)
+		}
+	}
+	mu.Unlock()
+
+	notifyAppServerTest(t, s, "turn/completed", map[string]any{
+		"threadId": "thread-1",
+		"turn":     map[string]any{"id": "turn-2", "status": "completed"},
+	})
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventResult || !event.Done {
+			t.Fatalf("event = %#v, want completed result", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retried initial turn did not emit a result")
+	}
+}
+
+func TestAppServerSession_CapacityRetryBackoffIsCapped(t *testing.T) {
+	s := &appServerSession{}
+	for attempt, want := range map[int]time.Duration{
+		0:  time.Second,
+		1:  time.Second,
+		2:  2 * time.Second,
+		3:  4 * time.Second,
+		4:  8 * time.Second,
+		5:  16 * time.Second,
+		6:  30 * time.Second,
+		99: 30 * time.Second,
+	} {
+		if got := s.capacityRetryBackoff(attempt); got != want {
+			t.Fatalf("capacityRetryBackoff(%d) = %s, want %s", attempt, got, want)
+		}
+	}
+}
+
+func TestSelectedModelAtCapacityErrorRequiresExactDiagnostic(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "completion diagnostic",
+			err:  fmt.Errorf("Selected model is at capacity. Please try a different model."),
+			want: true,
+		},
+		{
+			name: "wrapped turn start diagnostic",
+			err:  fmt.Errorf("codex app-server turn/start: %w", &rpcError{Message: "Selected model is at capacity. Please try a different model."}),
+			want: true,
+		},
+		{
+			name: "other capacity diagnostic",
+			err:  fmt.Errorf("selected model is at capacity during dispatch"),
+		},
+		{
+			name: "rate limit",
+			err:  fmt.Errorf("rate limit exceeded"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSelectedModelAtCapacityError(tt.err); got != tt.want {
+				t.Fatalf("isSelectedModelAtCapacityError(%v) = %t, want %t", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_CapacityRetryStopsWhenSessionCloses(t *testing.T) {
+	started := make(chan struct{}, 1)
+	stdin := &callbackWriteCloser{onWrite: func([]byte) {
+		started <- struct{}{}
+	}}
+	s := newScriptedAppServerSession(t, stdin)
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+	s.capacityRetryDelay = func(int) time.Duration { return time.Hour }
+
+	notifyAppServerTest(t, s, "turn/completed", map[string]any{
+		"threadId": "thread-1",
+		"turn": map[string]any{
+			"id":     "turn-1",
+			"status": "failed",
+			"error":  map[string]any{"message": "Selected model is at capacity. Please try a different model."},
+		},
+	})
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case <-started:
+		t.Fatal("capacity retry started after the session closed")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestAppServerSession_InterruptedTurnCompletionEmitsError(t *testing.T) {
 	s := newAppServerEventTestSession()
 
