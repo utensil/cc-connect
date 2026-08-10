@@ -107,6 +107,22 @@ intact.
 - Fork commit: [cfad9612](https://github.com/utensil/cc-connect/commit/cfad9612).
 - Merge record: [PR #6](https://github.com/utensil/cc-connect/pull/6).
 
+### Codex selected-model capacity recovery
+
+For the exact upstream diagnostic `Selected model is at capacity. Please try a
+different model.`, the Codex app-server session stays alive and retries with
+capped exponential delays of 1s, 2s, 4s, 8s, 16s, then 30s until the backend
+accepts a turn or the session is closed. An initial `turn/start` rejection
+retries its already-staged input. A capacity failure reported after a turn has
+completed starts a same-thread continuation instead, so completed tools and
+other side effects are not replayed. Other errors retain their existing error
+path.
+
+- Fork commit: [fdf5d301](https://github.com/utensil/cc-connect/commit/fdf5d301).
+- Merge record: [PR #8](https://github.com/utensil/cc-connect/pull/8).
+- Provenance: not present upstream; reimplemented in this fork after the
+  provider's selected-model capacity response was observed in production.
+
 ## Maintenance rules
 
 For every new fork feature, add a short behavior description, the commit that
