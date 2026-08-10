@@ -118,8 +118,9 @@ completed starts a same-thread continuation instead, so completed tools and
 other side effects are not replayed. Other errors retain their existing error
 path.
 
-- Fork commit: [fdf5d301](https://github.com/utensil/cc-connect/commit/fdf5d301).
-- Merge record: [PR #8](https://github.com/utensil/cc-connect/pull/8).
+- Fork commit landed on `dev`: [43a3f65b](https://github.com/utensil/cc-connect/commit/43a3f65b).
+- Merge record: [PR #8](https://github.com/utensil/cc-connect/pull/8), merged as
+  [1701d6e2](https://github.com/utensil/cc-connect/commit/1701d6e2).
 - Provenance: not present upstream; reimplemented in this fork after the
   provider's selected-model capacity response was observed in production.
 
