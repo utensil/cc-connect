@@ -44,8 +44,11 @@ func (e *rpcError) Error() string {
 }
 
 const (
-	appServerInternalErrorCode  = -32603
-	deadAgentLoopTurnStartError = "failed to start turn: internal error; agent loop died unexpectedly"
+	appServerInternalErrorCode   = -32603
+	deadAgentLoopTurnStartError  = "failed to start turn: internal error; agent loop died unexpectedly"
+	selectedModelAtCapacityError = "selected model is at capacity. please try a different model."
+
+	codexCapacityContinuationPrompt = "The previous Codex turn ended because the selected model was temporarily at capacity. Continue the same task from the current thread state. Do not repeat completed tool calls or other work; finish only what remains."
 )
 
 type initResponse struct {
@@ -201,14 +204,22 @@ type appServerSession struct {
 	currentTurn   string
 	preambleSent  bool
 
+	capacityRetryAttempt   int
+	capacityRetryScheduled bool
+	capacityRetryInput     []map[string]any
+	capacityRetryPreamble  bool
+	capacityRetryDelay     func(attempt int) time.Duration
+
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
 	context   *core.ContextUsage
 }
 
 const (
-	appServerRequestTimeout      = 120 * time.Second
-	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+	appServerRequestTimeout        = 120 * time.Second
+	appServerUsageRefreshTimeout   = 1500 * time.Millisecond
+	codexCapacityRetryInitialDelay = time.Second
+	codexCapacityRetryMaxDelay     = 30 * time.Second
 )
 
 func newAppServerSession(ctx context.Context, url, workDir, model string, modelOverride bool, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
@@ -507,11 +518,6 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	}
 	s.stateMu.Unlock()
 
-	threadID := s.CurrentSessionID()
-	if threadID == "" {
-		return fmt.Errorf("codex app-server thread id is empty")
-	}
-
 	input := make([]map[string]any, 0, 1+len(imagePaths))
 	input = append(input, map[string]any{
 		"type":          "text",
@@ -523,6 +529,23 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 			"type": "localImage",
 			"path": path,
 		})
+	}
+
+	preambleAdded, err = s.startTurn(input, preambleAdded)
+	if err == nil {
+		return nil
+	}
+	if isSelectedModelAtCapacityError(err) {
+		s.scheduleCapacityRetry(input, preambleAdded)
+		return nil
+	}
+	return err
+}
+
+func (s *appServerSession) startTurn(input []map[string]any, preambleAdded bool) (bool, error) {
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return preambleAdded, fmt.Errorf("codex app-server thread id is empty")
 	}
 
 	params := map[string]any{
@@ -543,34 +566,39 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	recovered := false
 	if err := s.request("turn/start", params, &resp); err != nil {
 		if !isDeadAgentLoopError(err) {
-			return fmt.Errorf("codex app-server turn/start: %w", err)
+			return preambleAdded, fmt.Errorf("codex app-server turn/start: %w", err)
 		}
 
 		failedThreadID := threadID
 		slog.Warn("codex app-server agent loop died; starting fresh thread", "thread_id", failedThreadID)
 		if recoveryErr := s.ensureThread(""); recoveryErr != nil {
 			s.alive.Store(false)
-			return fmt.Errorf("codex app-server turn/start fresh thread recovery after %v: %w", err, recoveryErr)
+			return preambleAdded, fmt.Errorf("codex app-server turn/start fresh thread recovery after %v: %w", err, recoveryErr)
 		}
 		recovered = true
 		s.emit(core.Event{Type: core.EventSessionRecovered, SessionID: s.CurrentSessionID()})
 
 		if !preambleAdded {
-			prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
-			input[0]["text"] = prompt
+			if prompt, ok := input[0]["text"].(string); ok {
+				input[0]["text"] = prependCodexPromptPreamble(prompt, s.promptPreamble)
+			}
+			preambleAdded = true
 		}
 		params["threadId"] = s.CurrentSessionID()
 		resp = turnStartResponse{}
 		if recoveryErr := s.request("turn/start", params, &resp); recoveryErr != nil {
+			if isSelectedModelAtCapacityError(recoveryErr) {
+				return preambleAdded, fmt.Errorf("codex app-server turn/start: %w", recoveryErr)
+			}
 			s.alive.Store(false)
-			return fmt.Errorf("codex app-server turn/start fresh thread recovery retry after %v: %w", err, recoveryErr)
+			return preambleAdded, fmt.Errorf("codex app-server turn/start fresh thread recovery retry after %v: %w", err, recoveryErr)
 		}
 	}
 	if resp.Turn.ID == "" {
 		if recovered {
 			s.alive.Store(false)
 		}
-		return fmt.Errorf("codex app-server turn/start returned empty turn id")
+		return preambleAdded, fmt.Errorf("codex app-server turn/start returned empty turn id")
 	}
 
 	s.stateMu.Lock()
@@ -580,7 +608,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	clear(s.functionCalls)
 	s.stateMu.Unlock()
 
-	return nil
+	return preambleAdded, nil
 }
 
 // Steer appends additional guidance to the currently active regular turn.
@@ -1711,14 +1739,122 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 		return
 	}
 	s.currentTurn = ""
+	if turnErr == nil || !isSelectedModelAtCapacityError(turnErr) {
+		s.capacityRetryAttempt = 0
+		s.capacityRetryScheduled = false
+		s.capacityRetryInput = nil
+		s.capacityRetryPreamble = false
+	}
 	s.stateMu.Unlock()
 	if turnErr != nil {
 		s.flushPendingAsThinking()
+		if isSelectedModelAtCapacityError(turnErr) {
+			s.scheduleCapacityRetry(capacityContinuationInput(), false)
+			return
+		}
 		s.emit(core.Event{Type: core.EventError, SessionID: s.CurrentSessionID(), Error: turnErr})
 		return
 	}
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+func (s *appServerSession) scheduleCapacityRetry(input []map[string]any, preambleAdded bool) {
+	s.stateMu.Lock()
+	if !s.alive.Load() || s.currentTurn != "" {
+		s.stateMu.Unlock()
+		return
+	}
+	s.capacityRetryAttempt++
+	attempt := s.capacityRetryAttempt
+	s.capacityRetryScheduled = true
+	s.capacityRetryInput = cloneTurnInput(input)
+	s.capacityRetryPreamble = preambleAdded
+	s.stateMu.Unlock()
+
+	delay := s.capacityRetryBackoff(attempt)
+	slog.Warn("codex selected model is at capacity; retrying turn", "thread_id", s.CurrentSessionID(), "attempt", attempt, "delay", delay)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if !s.alive.Load() {
+			return
+		}
+
+		s.stateMu.Lock()
+		if !s.capacityRetryScheduled || s.capacityRetryAttempt != attempt || s.currentTurn != "" {
+			s.stateMu.Unlock()
+			return
+		}
+		s.capacityRetryScheduled = false
+		input := cloneTurnInput(s.capacityRetryInput)
+		preambleAdded := s.capacityRetryPreamble
+		s.stateMu.Unlock()
+
+		preambleAdded, err := s.startTurn(input, preambleAdded)
+		if err != nil {
+			if isSelectedModelAtCapacityError(err) {
+				s.scheduleCapacityRetry(input, preambleAdded)
+				return
+			}
+			if s.ctx.Err() != nil || !s.alive.Load() {
+				return
+			}
+			s.resetCapacityRetry()
+			s.emitError(err)
+		}
+	}()
+}
+
+func (s *appServerSession) resetCapacityRetry() {
+	s.stateMu.Lock()
+	s.capacityRetryAttempt = 0
+	s.capacityRetryScheduled = false
+	s.capacityRetryInput = nil
+	s.capacityRetryPreamble = false
+	s.stateMu.Unlock()
+}
+
+func capacityContinuationInput() []map[string]any {
+	return []map[string]any{{
+		"type":          "text",
+		"text":          codexCapacityContinuationPrompt,
+		"text_elements": []any{},
+	}}
+}
+
+func cloneTurnInput(input []map[string]any) []map[string]any {
+	clone := make([]map[string]any, len(input))
+	for i, item := range input {
+		clone[i] = make(map[string]any, len(item))
+		for key, value := range item {
+			clone[i][key] = value
+		}
+	}
+	return clone
+}
+
+func (s *appServerSession) capacityRetryBackoff(attempt int) time.Duration {
+	if s.capacityRetryDelay != nil {
+		return s.capacityRetryDelay(attempt)
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	delay := codexCapacityRetryInitialDelay
+	for remaining := attempt - 1; remaining > 0 && delay < codexCapacityRetryMaxDelay; remaining-- {
+		delay *= 2
+	}
+	if delay > codexCapacityRetryMaxDelay {
+		return codexCapacityRetryMaxDelay
+	}
+	return delay
 }
 
 func turnCompletionError(notif turnNotification) error {
@@ -1737,6 +1873,16 @@ func isDeadAgentLoopError(err error) bool {
 	return errors.As(err, &rpcErr) &&
 		rpcErr.Code == appServerInternalErrorCode &&
 		rpcErr.Error() == deadAgentLoopTurnStartError
+}
+
+func isSelectedModelAtCapacityError(err error) bool {
+	for err != nil {
+		if strings.EqualFold(strings.TrimSpace(err.Error()), selectedModelAtCapacityError) {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
