@@ -484,16 +484,36 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
-	return a.startSession(ctx, sessionID, "")
+	return a.startSession(ctx, sessionID, "", "")
 }
 
 // StartSessionWithModel starts or resumes one conversation with a model
 // override, leaving the agent-wide default unchanged for other sessions.
 func (a *Agent) StartSessionWithModel(ctx context.Context, sessionID, modelOverride string) (core.AgentSession, error) {
-	return a.startSession(ctx, sessionID, strings.TrimSpace(modelOverride))
+	return a.startSession(ctx, sessionID, strings.TrimSpace(modelOverride), "")
 }
 
-func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride string) (core.AgentSession, error) {
+// StartSessionWithRuntime starts or resumes one conversation with isolated
+// model and reasoning overrides.
+func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID, modelOverride, reasoningOverride string) (core.AgentSession, error) {
+	modelOverride = strings.TrimSpace(modelOverride)
+	reasoningOverride = strings.TrimSpace(reasoningOverride)
+	if err := a.ValidateSessionRuntime(modelOverride, reasoningOverride); err != nil {
+		return nil, err
+	}
+	return a.startSession(ctx, sessionID, modelOverride, reasoningOverride)
+}
+
+// ValidateSessionRuntime checks overrides before a scheduled session starts.
+func (a *Agent) ValidateSessionRuntime(_ string, reasoningOverride string) error {
+	reasoningOverride = strings.TrimSpace(reasoningOverride)
+	if reasoningOverride != "" && normalizeReasoningEffort(reasoningOverride) == "" {
+		return fmt.Errorf("codex: invalid reasoning effort %q", reasoningOverride)
+	}
+	return nil
+}
+
+func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride, reasoningOverride string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
@@ -524,6 +544,9 @@ func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride strin
 	a.mu.Unlock()
 	if modelOverride != "" {
 		model = modelOverride
+	}
+	if reasoningOverride != "" {
+		reasoningEffort = normalizeReasoningEffort(reasoningOverride)
 	}
 
 	if provName != "" {

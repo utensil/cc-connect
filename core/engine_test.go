@@ -521,6 +521,7 @@ func (s *stubLiveModelSession) SetLiveModel(model string) bool {
 type sessionModelStartCall struct {
 	sessionID string
 	model     string
+	reasoning string
 }
 
 type stubSessionModelAgent struct {
@@ -531,6 +532,35 @@ type stubSessionModelAgent struct {
 func (a *stubSessionModelAgent) StartSessionWithModel(_ context.Context, sessionID, model string) (AgentSession, error) {
 	a.startCalls = append(a.startCalls, sessionModelStartCall{sessionID: sessionID, model: model})
 	return &stubAgentSession{}, nil
+}
+
+type runtimeResultAgent struct {
+	resultAgent
+	startCalls      []sessionModelStartCall
+	runtimeValidErr error
+	runtimeStartErr error
+}
+
+func (a *runtimeResultAgent) ValidateSessionRuntime(_, _ string) error {
+	return a.runtimeValidErr
+}
+
+func (a *runtimeResultAgent) StartSessionWithRuntime(_ context.Context, sessionID, model, reasoning string) (AgentSession, error) {
+	a.startCalls = append(a.startCalls, sessionModelStartCall{sessionID: sessionID, model: model, reasoning: reasoning})
+	if a.runtimeStartErr != nil {
+		return nil, a.runtimeStartErr
+	}
+	return a.session, nil
+}
+
+type modelResultAgent struct {
+	resultAgent
+	startCalls []sessionModelStartCall
+}
+
+func (a *modelResultAgent) StartSessionWithModel(_ context.Context, sessionID, model string) (AgentSession, error) {
+	a.startCalls = append(a.startCalls, sessionModelStartCall{sessionID: sessionID, model: model})
+	return a.session, nil
 }
 
 type stubLiveReasoningSession struct {
@@ -14364,6 +14394,115 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 
 	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "summarize activity") {
 		t.Fatalf("agent prompts = %#v, want prompt containing summarize activity", agentSession.sentPrompts)
+	}
+}
+
+func TestExecuteCronJob_NewPerRunUsesRuntimeOverrides(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agent := &runtimeResultAgent{resultAgent: resultAgent{session: newResultAgentSession("checked")}}
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+
+	job := &CronJob{
+		ID:          "spinrep-monitor",
+		SessionKey:  "discord:channel-1:user-1",
+		Prompt:      "inspect PRs",
+		SessionMode: "new_per_run",
+		Model:       "gpt-5.6-sol",
+		Reasoning:   "high",
+	}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() error = %v", err)
+	}
+
+	want := []sessionModelStartCall{{model: "gpt-5.6-sol", reasoning: "high"}}
+	if !reflect.DeepEqual(agent.startCalls, want) {
+		t.Fatalf("runtime starts = %#v, want %#v", agent.startCalls, want)
+	}
+	side := e.sessions.ListSessions("discord:thread-fresh")
+	if len(side) != 1 {
+		t.Fatalf("side sessions = %d, want 1", len(side))
+	}
+	if got := side[0].GetModelOverride(); got != "gpt-5.6-sol" {
+		t.Fatalf("side model = %q, want gpt-5.6-sol", got)
+	}
+	if got := side[0].GetReasoningOverride(); got != "high" {
+		t.Fatalf("side reasoning = %q, want high", got)
+	}
+}
+
+func TestExecuteCronJob_MutedInvalidRuntimeOverrideFails(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agent := &runtimeResultAgent{
+		resultAgent:     resultAgent{session: newResultAgentSession("unused")},
+		runtimeValidErr: errors.New("invalid reasoning effort"),
+	}
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	err := e.ExecuteCronJob(&CronJob{
+		ID: "muted-invalid", SessionKey: "discord:channel-1:user-1", Prompt: "inspect PRs",
+		SessionMode: "new_per_run", Reasoning: "typo", Mute: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid reasoning effort") {
+		t.Fatalf("ExecuteCronJob() error = %v, want invalid reasoning failure", err)
+	}
+	if len(agent.startCalls) != 0 {
+		t.Fatalf("runtime starts = %v, want none after failed preflight", agent.startCalls)
+	}
+}
+
+func TestExecuteCronJob_MutedRuntimeStartFailurePropagates(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agent := &runtimeResultAgent{
+		resultAgent:     resultAgent{session: newResultAgentSession("unused")},
+		runtimeStartErr: errors.New("runtime start failed"),
+	}
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	err := e.ExecuteCronJob(&CronJob{
+		ID: "muted-start-failure", SessionKey: "discord:channel-1:user-1", Prompt: "inspect PRs",
+		SessionMode: "new_per_run", Reasoning: "high", Mute: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime start failed") {
+		t.Fatalf("ExecuteCronJob() error = %v, want runtime start failure", err)
+	}
+	if len(agent.startCalls) != 1 {
+		t.Fatalf("runtime starts = %v, want one failed start", agent.startCalls)
+	}
+}
+
+func TestExecuteCronJob_RuntimeOverrideCapabilities(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agent := &modelResultAgent{resultAgent: resultAgent{session: newResultAgentSession("checked")}}
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	modelJob := &CronJob{
+		ID: "model-only", SessionKey: "discord:channel-1:user-1", Prompt: "inspect PRs",
+		SessionMode: "new_per_run", Model: "gpt-5.6-sol",
+	}
+	if err := e.ExecuteCronJob(modelJob); err != nil {
+		t.Fatalf("model-only ExecuteCronJob() error = %v", err)
+	}
+	if want := []sessionModelStartCall{{model: "gpt-5.6-sol"}}; !reflect.DeepEqual(agent.startCalls, want) {
+		t.Fatalf("model starts = %v, want %v", agent.startCalls, want)
+	}
+
+	reasoningJob := &CronJob{
+		ID: "unsupported-reasoning", SessionKey: "discord:channel-1:user-1", Prompt: "inspect PRs",
+		SessionMode: "new_per_run", Reasoning: "high", Mute: true,
+	}
+	if err := e.ExecuteCronJob(reasoningJob); err == nil || !strings.Contains(err.Error(), "does not support cron reasoning") {
+		t.Fatalf("unsupported reasoning error = %v", err)
 	}
 }
 

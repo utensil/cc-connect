@@ -34,6 +34,8 @@ type CronJob struct {
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
+	Model       string    `json:"model,omitempty"`        // model override for new_per_run sessions
+	Reasoning   string    `json:"reasoning,omitempty"`    // reasoning override for new_per_run sessions
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
 	LastRun     time.Time `json:"last_run,omitempty"`
@@ -99,6 +101,12 @@ func validateCronJob(j *CronJob) error {
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
+	}
+	if (strings.TrimSpace(j.Model) != "" || strings.TrimSpace(j.Reasoning) != "") && mode != "new_per_run" {
+		return fmt.Errorf("model and reasoning overrides require session_mode new_per_run")
+	}
+	if j.IsShellJob() && (strings.TrimSpace(j.Model) != "" || strings.TrimSpace(j.Reasoning) != "") {
+		return fmt.Errorf("model and reasoning overrides are not valid for shell cron jobs")
 	}
 	if j.Mode != "" {
 		switch j.Mode {
@@ -580,6 +588,16 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 		}
 	}
 
+	if field == "model" || field == "reasoning" || field == "session_mode" || field == "exec" {
+		candidate := *job
+		if err := updateJobField(&candidate, field, value); err != nil {
+			return err
+		}
+		if err := validateCronJob(&candidate); err != nil {
+			return err
+		}
+	}
+
 	// Check if reschedule is needed
 	needsReschedule := field == "cron_expr" || field == "enabled"
 
@@ -731,7 +749,6 @@ type mutePlatform struct {
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
-
 
 func GenerateCronID() string {
 	b := make([]byte, 4)

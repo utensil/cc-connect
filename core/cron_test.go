@@ -114,7 +114,6 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 	}
 }
 
-
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
 	if job.Mute {
@@ -589,6 +588,54 @@ func TestCronScheduler_AddJob_InvalidSessionMode(t *testing.T) {
 	}
 }
 
+func TestCronScheduler_RuntimeOverridesRequireNewPerRun(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	invalid := &CronJob{
+		ID: "invalid-runtime", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", Model: "gpt-5.6-sol",
+	}
+	if err := cs.AddJob(invalid); err == nil {
+		t.Fatal("AddJob accepted a model override without new_per_run")
+	}
+
+	valid := &CronJob{
+		ID: "valid-runtime", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", SessionMode: "new_per_run",
+	}
+	if err := cs.AddJob(valid); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.UpdateJob(valid.ID, "reasoning", "high"); err != nil {
+		t.Fatalf("set reasoning: %v", err)
+	}
+	if err := cs.UpdateJob(valid.ID, "session_mode", "reuse"); err == nil {
+		t.Fatal("UpdateJob allowed reuse while a runtime override remained")
+	}
+	if got := store.Get(valid.ID).SessionMode; got != "new_per_run" {
+		t.Fatalf("session_mode changed after rejected update: %q", got)
+	}
+
+	shell := &CronJob{
+		ID: "shell-runtime", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Exec: "true", SessionMode: "new_per_run", Model: "gpt-5.6-sol",
+	}
+	if err := cs.AddJob(shell); err == nil {
+		t.Fatal("AddJob accepted runtime overrides on a shell job")
+	}
+	if err := cs.UpdateJob(valid.ID, "exec", "true"); err == nil {
+		t.Fatal("UpdateJob converted an override job to a shell job")
+	}
+	if got := store.Get(valid.ID).Exec; got != "" {
+		t.Fatalf("exec changed after rejected update: %q", got)
+	}
+}
+
 func TestCronJob_UsesNewSessionPerRun(t *testing.T) {
 	for _, mode := range []string{"new_per_run", "new-per-run", "NEW_PER_RUN"} {
 		j := &CronJob{SessionMode: mode}
@@ -613,6 +660,21 @@ func TestCronJob_JSONLegacyUnmarshal(t *testing.T) {
 	}
 	if j.TimeoutMins != nil {
 		t.Errorf("legacy JSON: TimeoutMins = %v, want nil", j.TimeoutMins)
+	}
+}
+
+func TestCronJob_JSONRuntimeOverrides(t *testing.T) {
+	want := CronJob{Model: "gpt-5.6-sol", Reasoning: "high", SessionMode: "new_per_run"}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got CronJob
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != want.Model || got.Reasoning != want.Reasoning {
+		t.Fatalf("runtime overrides = %q/%q, want %q/%q", got.Model, got.Reasoning, want.Model, want.Reasoning)
 	}
 }
 

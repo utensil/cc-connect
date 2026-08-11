@@ -47,4 +47,9 @@ func TestPrintCronAddUsage_DocumentsSilent(t *testing.T) {
 	if !strings.Contains(help, "cc-connect cron add --cron \"0 9 * * *\" --prompt \"Daily standup reminder\" --silent") {
 		t.Errorf("printCronAddUsage does not include --silent example; got:\n%s", help)
 	}
+	for _, flag := range []string{"--model", "--reasoning"} {
+		if !strings.Contains(help, flag) {
+			t.Errorf("printCronAddUsage does not document %s; got:\n%s", flag, help)
+		}
+	}
 }

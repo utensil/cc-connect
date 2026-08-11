@@ -40,6 +40,8 @@ func TestParseCronEditValue(t *testing.T) {
 		{"cron_expr string", "cron_expr", "0 6 * * *", "0 6 * * *", false},
 		{"description string", "description", "Daily standup", "Daily standup", false},
 		{"session_mode string", "session_mode", "reuse", "reuse", false},
+		{"model string", "model", "gpt-5.6-sol", "gpt-5.6-sol", false},
+		{"reasoning string", "reasoning", "high", "high", false},
 		{"unknown field defaults to string", "made_up_field", "anything", "anything", false},
 	}
 

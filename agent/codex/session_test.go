@@ -54,6 +54,13 @@ func TestAvailableReasoningEfforts_IncludesCodexGPT56Levels(t *testing.T) {
 	}
 }
 
+func TestStartSessionWithRuntime_RejectsInvalidReasoning(t *testing.T) {
+	agent := &Agent{}
+	if _, err := agent.StartSessionWithRuntime(context.Background(), "", "gpt-5.6-sol", "typo"); err == nil {
+		t.Fatal("StartSessionWithRuntime() accepted invalid reasoning effort")
+	}
+}
+
 func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "", "", "")
 	if err != nil {

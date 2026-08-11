@@ -509,6 +509,7 @@ type queuedMessage struct {
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession             AgentSession
+	startErr                 error
 	platform                 Platform
 	replyCtx                 any
 	currentMessageID         string
@@ -1772,8 +1773,21 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if useNewSession {
+		if job.Model != "" || job.Reasoning != "" {
+			if starter, ok := agent.(SessionRuntimeStarter); ok {
+				if err := starter.ValidateSessionRuntime(job.Model, job.Reasoning); err != nil {
+					return fmt.Errorf("validate cron runtime overrides: %w", err)
+				}
+			} else if job.Reasoning != "" {
+				return fmt.Errorf("agent %q does not support cron reasoning overrides", agent.Name())
+			} else if _, ok := agent.(SessionModelStarter); !ok {
+				return fmt.Errorf("agent %q does not support cron model overrides", agent.Name())
+			}
+		}
 		msg.SessionKey = runSessionKey
 		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session.SetModelOverride(job.Model)
+		session.SetReasoningOverride(job.Reasoning)
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
@@ -1782,8 +1796,11 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			iKey = workspaceDir + ":" + iKey
 		}
 		prevHistLen := session.HistoryLen()
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		runErr := e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
+		if runErr != nil {
+			return fmt.Errorf("cron job %q: %w", job.ID, runErr)
+		}
 		// Empty-response detection via session history delta: processInteractiveMessageWith
 		// always adds a "user" entry (prevHistLen+1), then an "assistant" entry on success
 		// (prevHistLen+2). This approach correctly detects empty responses across all
@@ -3858,7 +3875,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 // It accepts an explicit agent, interactiveKey (for the interactiveStates map),
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY in the agent env; otherwise interactiveKey is used.
-func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) {
+func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) error {
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -3871,7 +3888,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}()
 
 	if e.ctx.Err() != nil {
-		return
+		return e.ctx.Err()
 	}
 
 	turnStart := time.Now()
@@ -3914,7 +3931,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
-		return
+		if state.startErr != nil {
+			return state.startErr
+		}
+		return fmt.Errorf("failed to start agent session")
 	}
 	e.cancelAgentSessionIdleClose(state)
 
@@ -4014,6 +4034,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
 		e.scheduleAgentSessionIdleClose(interactiveKey, state)
 	}
+	return nil
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
@@ -4247,7 +4268,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, startErr: e.ctx.Err(), eventsNeedResync: true}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 		state = newState
 		e.interactiveStates[sessionKey] = state
@@ -4283,8 +4304,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	isResume := startSessionID != ""
 	modelOverride := session.GetModelOverride()
+	reasoningOverride := session.GetReasoningOverride()
 	startAt := time.Now()
-	agentSession, err := startAgentSessionWithModelOverride(e.ctx, agent, startSessionID, modelOverride)
+	agentSession, err := startAgentSessionWithRuntimeOverrides(e.ctx, agent, startSessionID, modelOverride, reasoningOverride)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -4297,7 +4319,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = startAgentSessionWithModelOverride(e.ctx, agent, "", modelOverride)
+			agentSession, err = startAgentSessionWithRuntimeOverrides(e.ctx, agent, "", modelOverride, reasoningOverride)
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -4312,7 +4334,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, startErr: err, eventsNeedResync: true}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -4375,7 +4397,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	return state
 }
 
-func startAgentSessionWithModelOverride(ctx context.Context, agent Agent, sessionID, modelOverride string) (AgentSession, error) {
+func startAgentSessionWithRuntimeOverrides(ctx context.Context, agent Agent, sessionID, modelOverride, reasoningOverride string) (AgentSession, error) {
+	modelOverride = strings.TrimSpace(modelOverride)
+	reasoningOverride = strings.TrimSpace(reasoningOverride)
+	if modelOverride != "" || reasoningOverride != "" {
+		if starter, ok := agent.(SessionRuntimeStarter); ok {
+			return starter.StartSessionWithRuntime(ctx, sessionID, modelOverride, reasoningOverride)
+		}
+	}
+	if reasoningOverride != "" {
+		return nil, fmt.Errorf("agent %q does not support per-session reasoning", agent.Name())
+	}
 	if model := strings.TrimSpace(modelOverride); model != "" {
 		if starter, ok := agent.(SessionModelStarter); ok {
 			return starter.StartSessionWithModel(ctx, sessionID, model)
@@ -8961,7 +8993,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 	if !supportsCards(p) {
 		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
 		agent = e.sessionAgentFor(msg, agent, sessions)

@@ -57,7 +57,7 @@ func closeCronResponseBody(body io.Closer) {
 }
 
 func runCronAdd(args []string) {
-	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
+	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode, model, reasoningEffort string
 	var timeoutMins *int
 	var silent bool
 
@@ -103,6 +103,16 @@ func runCronAdd(args []string) {
 			if i+1 < len(args) {
 				i++
 				sessionMode = args[i]
+			}
+		case "--model":
+			if i+1 < len(args) {
+				i++
+				model = args[i]
+			}
+		case "--reasoning":
+			if i+1 < len(args) {
+				i++
+				reasoningEffort = args[i]
 			}
 		case "--timeout-mins":
 			if i+1 < len(args) {
@@ -171,6 +181,12 @@ func runCronAdd(args []string) {
 	}
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
+	}
+	if model != "" {
+		body["model"] = model
+	}
+	if reasoningEffort != "" {
+		body["reasoning"] = reasoningEffort
 	}
 	if timeoutMins != nil {
 		body["timeout_mins"] = *timeoutMins
@@ -583,7 +599,7 @@ func parseCronEditValue(field, valueStr string) (any, error) {
 		return v, nil
 	default:
 		// String fields: project, session_key, cron_expr, prompt, exec,
-		// work_dir, description, session_mode, mode
+		// work_dir, description, session_mode, mode, model, reasoning
 		return valueStr, nil
 	}
 }
@@ -627,6 +643,8 @@ Options:
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
       --session-mode <mode>  reuse (default) or new-per-run — fresh agent session each run
+      --model <name>          Model override; requires --session-mode new-per-run
+      --reasoning <effort>    Reasoning override; requires --session-mode new-per-run
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30 if omitted)
       --silent               Suppress cron start notification
       --data-dir <path>      Data directory (default: ~/.cc-connect)
@@ -667,6 +685,8 @@ Editable Fields (string):
   work_dir      Working directory for exec
   description   Short description
   session_mode  reuse or new_per_run
+  model         Model for new_per_run sessions
+  reasoning     Reasoning for new_per_run sessions
 
 Editable Fields (bool: true/false):
   enabled       Enable or disable the task

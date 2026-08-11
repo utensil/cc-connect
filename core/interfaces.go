@@ -137,6 +137,8 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do N
 
 Optional flags:
   --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
+  --model <name>            model override; requires --session-mode new-per-run
+  --reasoning <effort>      reasoning override; requires --session-mode new-per-run
   --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
   --exec <command>          run a shell command directly instead of --prompt
 
@@ -503,6 +505,13 @@ type LiveModelSwitcher interface {
 // conversation with a model override without changing the agent-wide default.
 type SessionModelStarter interface {
 	StartSessionWithModel(ctx context.Context, sessionID, model string) (AgentSession, error)
+}
+
+// SessionRuntimeStarter is implemented by agents that can create or resume one
+// conversation with model and reasoning overrides without changing defaults.
+type SessionRuntimeStarter interface {
+	ValidateSessionRuntime(model, reasoningEffort string) error
+	StartSessionWithRuntime(ctx context.Context, sessionID, model, reasoningEffort string) (AgentSession, error)
 }
 
 // ReasoningEffortSwitcher is an optional interface for agents that support

@@ -516,11 +516,14 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 
 	// Add
 	r = mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
-		"project":     "test-project",
-		"session_key": "user1",
-		"cron_expr":   "0 9 * * *",
-		"prompt":      "hello",
-		"description": "test cron",
+		"project":      "test-project",
+		"session_key":  "user1",
+		"cron_expr":    "0 9 * * *",
+		"prompt":       "hello",
+		"description":  "test cron",
+		"session_mode": "new_per_run",
+		"model":        "gpt-5.6-sol",
+		"reasoning":    "high",
 	})
 	if !r.OK {
 		t.Fatalf("cron add failed: %s", r.Error)
@@ -532,6 +535,9 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	}
 	if job.ID == "" {
 		t.Fatal("expected cron job ID")
+	}
+	if job.Model != "gpt-5.6-sol" || job.Reasoning != "high" {
+		t.Fatalf("runtime overrides = %q/%q, want gpt-5.6-sol/high", job.Model, job.Reasoning)
 	}
 
 	// List (should have 1)

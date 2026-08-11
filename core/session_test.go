@@ -36,6 +36,17 @@ func TestSession_ModelOverridePersists(t *testing.T) {
 	}
 }
 
+func TestSession_ReasoningOverridePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	sm := NewSessionManager(path)
+	sm.GetOrCreateActive("user1").SetReasoningOverride("high")
+	sm.Save()
+
+	if got := NewSessionManager(path).GetOrCreateActive("user1").GetReasoningOverride(); got != "high" {
+		t.Fatalf("reasoning override = %q, want high", got)
+	}
+}
+
 func TestSessionManager_NewSession(t *testing.T) {
 	sm := NewSessionManager("")
 	s1 := sm.NewSession("user1", "chat-a")

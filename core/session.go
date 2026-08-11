@@ -18,24 +18,25 @@ const ContinueSession = "__continue__"
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	AgentSessionID      string   `json:"agent_session_id"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
 	// `/provider switch` (the agent_session_id survives on disk while the
 	// in-memory active provider does not). Empty means "no explicit choice
 	// — use whatever the agent's default is".
-	ActiveProvider string         `json:"active_provider,omitempty"`
-	ModelOverride  string         `json:"model_override,omitempty"` // Per-session model selection.
-	AgentOverride   string         `json:"agent_override,omitempty"` // Per-session agent type override (/agent).
-	WorkDirOverride string         `json:"work_dir_override,omitempty"` // Per-session work dir override (/path).
-	History        []HistoryEntry `json:"history"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ActiveProvider  string         `json:"active_provider,omitempty"`
+	ModelOverride   string         `json:"model_override,omitempty"`     // Per-session model selection.
+	Reasoning       string         `json:"reasoning_override,omitempty"` // Per-session reasoning selection.
+	AgentOverride   string         `json:"agent_override,omitempty"`     // Per-session agent type override (/agent).
+	WorkDirOverride string         `json:"work_dir_override,omitempty"`  // Per-session work dir override (/path).
+	History         []HistoryEntry `json:"history"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
 	// LastUserActivity records when a real user message was last received.
 	// Unlike UpdatedAt (bumped by every session.Unlock including heartbeats and
 	// unsolicited agent output), this field is only updated when the engine
@@ -198,6 +199,20 @@ func (s *Session) GetModelOverride() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ModelOverride
+}
+
+// SetReasoningOverride records a reasoning selection for this conversation only.
+func (s *Session) SetReasoningOverride(effort string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Reasoning = strings.TrimSpace(effort)
+}
+
+// GetReasoningOverride returns the selected reasoning effort for this conversation.
+func (s *Session) GetReasoningOverride() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Reasoning
 }
 
 // SetAgentOverride atomically sets the session agent type override (/agent).
@@ -707,6 +722,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			ModelOverride:       s.ModelOverride,
+			Reasoning:           s.Reasoning,
 			AgentOverride:       s.AgentOverride,
 			WorkDirOverride:     s.WorkDirOverride,
 			History:             append([]HistoryEntry(nil), s.History...),
@@ -895,7 +911,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	defer sm.mu.Unlock()
 
 	// Group sessions by baseChat
-	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
 	for userKey, sessionIDs := range sm.userSessions {
