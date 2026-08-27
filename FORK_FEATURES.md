@@ -60,6 +60,22 @@ steering as unsupported. Enable `rpc = true` for any Pi agent used with
 - Upstream status: no Pi steering implementation was found in the canonical
   repository; generic steering API work remains in competing upstream PRs.
 
+### Pi turn cancellation and output policy
+
+Pi RPC prompts always carry Pi's required `streamingBehavior = "followUp"`;
+`/stop` sends the native RPC `abort` and serializes follow-up admission so the
+next prompt cannot race the cancellation. JSON-mode cancellation synchronously
+reaps the one-shot process before the engine falls back to session cleanup.
+Configure `stream_preview.disabled_agents = ["pi"]` when Pi replies should be
+delivered only as final messages: this disables preview edits, compact progress
+edits, and streaming-card updates without an agent-name branch in the engine.
+Pi's session adapter separately compacts runs of blank lines at the response
+boundary, preserving normal Markdown paragraph breaks and history continuity.
+
+- Fork commit: [2605d4e4](https://github.com/utensil/cc-connect/commit/2605d4e4) on `feat/agent-switch-pi` (PR #10).
+- Live configuration was intentionally not changed on the development device;
+  enable the documented setting during deployment.
+
 ### Unicode-aware command parsing
 
 Commands split arguments on Unicode whitespace, so pasted Discord text and
