@@ -37,12 +37,28 @@ fallback if a reaction cannot be added.
 ### Default busy-message steering
 
 Set `queue.busy_behavior = "steer"` to inject a plain-text follow-up into the
-active Codex turn by default. Messages with attachments, locations, or a
-session still starting continue to queue safely. Explicit `/steer` remains
-available.
+active steer-capable agent turn by default. Messages with attachments,
+locations, or a session still starting continue to queue safely. If the
+backend rejects the steer, the original follow-up falls back to the durable
+FIFO queue; explicit `/steer` remains available and reports its failure.
 
 - Fork merge commit: [c0c76ab7](https://github.com/utensil/cc-connect/commit/c0c76ab7).
 - Merge record: [PR #1](https://github.com/utensil/cc-connect/pull/1).
+
+### Pi RPC same-turn steering
+
+Pi sessions in persistent RPC mode implement `SessionSteerer` with Pi's native
+`{"type":"steer","message":"..."}` command. The command is queued by Pi
+after the current turn's tool calls and before the next model call, so it does
+not create a second session or turn. One-shot JSON-mode Pi sessions report
+steering as unsupported. Enable `rpc = true` for any Pi agent used with
+`queue.busy_behavior = "steer"` or `/steer`.
+
+- Fork commits: [fc905d32](https://github.com/utensil/cc-connect/commit/fc905d32)
+  (Pi RPC transport) and [213c8d81](https://github.com/utensil/cc-connect/commit/213c8d81)
+  (busy-steer fallback and CUJ coverage), currently on the feature branch.
+- Upstream status: no Pi steering implementation was found in the canonical
+  repository; generic steering API work remains in competing upstream PRs.
 
 ### Unicode-aware command parsing
 
