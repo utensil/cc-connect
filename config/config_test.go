@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -682,6 +683,26 @@ func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
 	}
 	if _, ok := cfg.Projects[0].Platforms[0].Options["chat_id"].(int64); !ok {
 		t.Fatalf("chat_id type = %T, want int64", cfg.Projects[0].Platforms[0].Options["chat_id"])
+	}
+}
+
+func TestLoad_StreamPreviewDisabledAgents(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+
+[stream_preview]
+disabled_agents = ["Pi", "custom-agent"]
+disabled_platforms = ["feishu"]
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got, want := cfg.StreamPreview.DisabledAgents, []string{"Pi", "custom-agent"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StreamPreview.DisabledAgents = %#v, want %#v", got, want)
+	}
+	if got, want := cfg.StreamPreview.DisabledPlatforms, []string{"feishu"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StreamPreview.DisabledPlatforms = %#v, want %#v", got, want)
 	}
 }
 

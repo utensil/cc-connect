@@ -2315,6 +2315,29 @@ func newCUJStreamingEnv(t *testing.T) *cujEnv {
 	}
 }
 
+func newCUJNoLiveOutputEnv(t *testing.T) *cujEnv {
+	t.Helper()
+	dir := t.TempDir()
+	plat := &cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agent := &cujAgent{}
+	storePath := dir + "/sessions.json"
+	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	e.SetStreamPreviewCfg(StreamPreviewCfg{
+		Enabled:        true,
+		DisabledAgents: []string{"CUJ"},
+		IntervalMs:     0,
+		MinDeltaChars:  1,
+		MaxChars:       2000,
+	})
+	return &cujEnv{
+		t:       t,
+		engine:  e,
+		plat:    &plat.stubPlatformEngine,
+		agent:   agent,
+		tempDir: dir,
+	}
+}
+
 // sendStreaming drives the engine through ReceiveMessage using the full
 // cujStreamingPlatform (not just its embedded stubPlatformEngine). This is
 // essential for CUJs that need the engine to see MessageUpdater and
@@ -2511,5 +2534,39 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		if strings.Contains(m, postText) {
 			t.Fatalf("post-resolution text was bulk-sent via plain Send (regression: streaming broken after permission prompt). getSent=%#v", plat.getSent())
 		}
+	}
+}
+
+// CUJ-STREAM-2 · A configured agent can opt out of every live-updating
+// delivery path while retaining a normal final reply. The policy is supplied
+// through StreamPreviewCfg.DisabledAgents, not by branching on an agent name
+// in the engine or platform code.
+func TestCUJ_STREAM2_ConfiguredAgentSuppressesLiveEdits(t *testing.T) {
+	env := newCUJNoLiveOutputEnv(t)
+	response := "final response delivered once without live edits"
+	env.agent.setNextSessionEvents([]Event{
+		{Type: EventThinking, Content: "planning"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"},
+		{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"},
+		{Type: EventText, Content: response},
+		{Type: EventResult, Content: response, Done: true},
+	}, 0)
+
+	// User action: send one prompt and wait for the final answer.
+	env.sendStreaming("config-user", "please answer")
+	env.waitFor("configured-agent final reply", 2*time.Second, func() bool {
+		return env.sentContains(response)
+	})
+
+	plat := env.streamingPlat()
+	if opens := plat.getPreviewOpens(); len(opens) != 0 {
+		t.Fatalf("configured live-output opt-out opened %d preview messages: %#v", len(opens), opens)
+	}
+	if updates := plat.getPreviewUpdates(); len(updates) != 0 {
+		t.Fatalf("configured live-output opt-out edited %d preview messages: %#v", len(updates), updates)
+	}
+	history := env.activeSession("test:config-user").GetHistory(0)
+	if len(history) < 2 || history[len(history)-1].Role != "assistant" || history[len(history)-1].Content != response {
+		t.Fatalf("final response was not retained normally in history: %#v", history)
 	}
 }

@@ -330,6 +330,12 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 	return w
 }
 
+// disable prevents this writer from opening or editing a progress message.
+// It is used by agents that deliberately opt out of all live-updating output.
+func (w *compactProgressWriter) disable() {
+	w.enabled = false
+}
+
 func normalizeProgressAgentLabel(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "agent":

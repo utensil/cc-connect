@@ -119,6 +119,17 @@ token = "MTk4NjIyNDgzNDcOTY3NDUxMg.G8vKqh.xxx..."
 > cc-connect automatically configures the required Intents (MESSAGE_CONTENT, GUILD_MESSAGES, DIRECT_MESSAGES).
 > With `thread_isolation = true`, cc-connect creates or reuses a Discord thread for each session and routes follow-up messages by thread channel ID.
 > `progress_style = "compact"` merges thinking/tool updates into one editable message; `progress_style = "card"` renders a Discord-native embed progress card and still sends the final answer as a normal message.
+
+If an agent should never produce live edits (for example, Pi replies that
+should arrive only as final messages), configure the global output policy:
+
+```toml
+[stream_preview]
+disabled_agents = ["pi"]
+```
+
+This disables streaming previews, compact progress edits, and streaming-card
+updates for matching `Agent.Name()` values while preserving the final reply.
 > With `ack_style = "reaction"`, successful active `/steer` commands and accepted queued messages react to the user's message instead of sending acknowledgement text. Errors and queue-full responses remain visible text; failed reactions also fall back to text.
 
 ---

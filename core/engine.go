@@ -1506,6 +1506,29 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 	e.streamPreview = cfg
 }
 
+// liveOutputEnabledForAgent applies the configured live-output policy to an
+// agent. Keeping this decision in StreamPreviewCfg means individual agents do
+// not need hardcoded knowledge of Discord (or any other platform's edit API).
+func liveOutputEnabledForAgent(cfg StreamPreviewCfg, agent Agent) bool {
+	if agent == nil {
+		return true
+	}
+	name := strings.TrimSpace(agent.Name())
+	for _, disabled := range cfg.DisabledAgents {
+		if strings.EqualFold(strings.TrimSpace(disabled), name) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeAgentResponseText(session AgentSession, text string) string {
+	if normalizer, ok := session.(AgentResponseNormalizer); ok {
+		return normalizer.NormalizeResponseText(text)
+	}
+	return text
+}
+
 // SetMaxTurnTime sets an absolute wall-clock limit on how long a single agent turn
 // may run. Unlike SetEventIdleTimeout (which resets on every event), this timer is
 // not reset by tool-call activity. When it fires, the session is terminated and the
@@ -5010,23 +5033,40 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
+	normalizeReplyText := func(content string) string {
+		return normalizeAgentResponseText(state.agentSession, content)
+	}
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
+	liveOutput := liveOutputEnabledForAgent(e.streamPreview, replyAgent)
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
-		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
-			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
-		} else {
-			streamCard = sc
-			slog.Info("streaming card created for turn", "session", sessionKey)
+	if liveOutput {
+		if scp, ok := state.platform.(StreamingCardPlatform); ok {
+			if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
+				slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
+			} else {
+				streamCard = sc
+				slog.Info("streaming card created for turn", "session", sessionKey)
+			}
 		}
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	streamPreviewCfg := e.streamPreview
+	if !liveOutput {
+		streamPreviewCfg.Enabled = false
+	}
+	sp := newStreamPreview(streamPreviewCfg, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	progressAgentName := "agent"
+	if replyAgent != nil {
+		progressAgentName = replyAgent.Name()
+	}
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, progressAgentName, e.i18n.CurrentLang(), workspaceRenderer)
+	if !liveOutput {
+		cp.disable()
+	}
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -5198,6 +5238,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if e.display.CardMode != "rich" {
 			hasRichCard = false
 		}
+		if !liveOutput {
+			// The configured agent policy covers every live-updating path,
+			// including the opt-in rich-card renderer below.
+			hasRichCard = false
+		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
 			if !hasRichMarkdownResolver || markdown == "" {
@@ -5290,7 +5335,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						sp.freeze()
 						sp.detachPreview()
 					} else {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5313,7 +5358,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
 					if !previewActive {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5377,7 +5422,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						sp.freeze()
 						sp.detachPreview()
 					} else {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5421,7 +5466,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
 					if !previewActive {
-						segment := strings.Join(textParts[segmentStart:], "")
+						segment := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 						if segment != "" {
 							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 								sendWorkspace(p, replyCtx, chunk)
@@ -5690,7 +5735,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			previewActive := sp.canPreview()
 			if len(textParts) > segmentStart {
 				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
+					segment := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 					if segment != "" {
 						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
 							sendWorkspace(p, replyCtx, chunk)
@@ -5811,6 +5856,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			fullResponse = normalizeAgentResponseText(state.agentSession, fullResponse)
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
@@ -6059,7 +6105,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
 				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
+					unsent := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 					if unsent != "" {
 						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
 							return
@@ -6225,8 +6271,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				queuedStreamPreviewCfg := e.streamPreview
+				if !liveOutput {
+					queuedStreamPreviewCfg.Enabled = false
+				}
+				sp = newStreamPreview(queuedStreamPreviewCfg, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, progressAgentName, e.i18n.CurrentLang(), queuedRenderer)
+				if !liveOutput {
+					cp.disable()
+				}
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
@@ -6235,11 +6288,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardAnswerText.Reset()
 
 				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
-					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
-						slog.Warn("streaming card creation failed for queued turn", "error", err)
-					} else {
-						streamCard = sc
+				if liveOutput {
+					if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+						if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
+							slog.Warn("streaming card creation failed for queued turn", "error", err)
+						} else {
+							streamCard = sc
+						}
 					}
 				}
 
@@ -6378,7 +6433,7 @@ channelClosed:
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
 			if segmentStart < len(textParts) {
-				unsent := strings.Join(textParts[segmentStart:], "")
+				unsent := normalizeReplyText(strings.Join(textParts[segmentStart:], ""))
 				if unsent != "" {
 					for _, chunk := range splitMessage(unsent, maxPlatformMessageLen) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {

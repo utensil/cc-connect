@@ -648,6 +648,9 @@ func main() {
 			if cfg.StreamPreview.DisabledPlatforms != nil {
 				spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
 			}
+			if cfg.StreamPreview.DisabledAgents != nil {
+				spcfg.DisabledAgents = cfg.StreamPreview.DisabledAgents
+			}
 			engine.SetStreamPreviewCfg(spcfg)
 		}
 

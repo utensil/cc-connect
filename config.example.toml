@@ -241,6 +241,7 @@ level = "info" # debug, info, warn, error
 
 # [stream_preview]
 # enabled = true            # Enable/disable streaming preview (default: true) / 启用/禁用流式预览（默认 true）
+# disabled_agents = ["pi"]  # Disable all live-updating output for these agents (previews, progress, cards); names use Agent.Name()
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）

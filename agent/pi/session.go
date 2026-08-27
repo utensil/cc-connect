@@ -66,6 +66,7 @@ type piSession struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup // tracks readLoopRPC goroutine (RPC mode only)
+	sendMu  sync.Mutex     // serializes sendWg admission with stop/close
 	sendWg  sync.WaitGroup // tracks in-flight Send() calls
 	alive   atomic.Bool
 
@@ -317,12 +318,10 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 // In json mode (default): spawns a one-shot `pi --mode json` process.
 // In rpc mode: writes a "prompt" command to the persistent RPC process stdin.
 func (s *piSession) Send(msg string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	s.sendWg.Add(1)
-	defer s.sendWg.Done()
-
-	if !s.alive.Load() {
+	if !s.beginSend() {
 		return fmt.Errorf("session is closed")
 	}
+	defer s.sendWg.Done()
 
 	// Drop any pending thinking left over from the previous turn — a turn
 	// that ended with buffered thinking (no tool call) must not leak that
@@ -358,6 +357,30 @@ func (s *piSession) Send(msg string, images []core.ImageAttachment, files []core
 	return s.sendJSON(promptText.String())
 }
 
+// NormalizeResponseText removes transport noise from Pi's final response.
+// In particular, Pi can split paragraph separators across several streamed
+// updates; cap newline runs so they cannot render as stacks of empty Discord
+// paragraphs while preserving ordinary Markdown paragraph breaks.
+func (s *piSession) NormalizeResponseText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+
+	var b strings.Builder
+	newlineRun := 0
+	for _, r := range text {
+		if r == '\n' {
+			if newlineRun < 2 {
+				b.WriteRune(r)
+			}
+			newlineRun++
+			continue
+		}
+		newlineRun = 0
+		b.WriteRune(r)
+	}
+	return strings.Trim(b.String(), " \t\n")
+}
+
 // sendJSON spawns `pi --mode json -p <prompt>` as a one-shot process,
 // reads all output events, and sends them to the events channel.
 func (s *piSession) sendJSON(prompt string) error {
@@ -384,12 +407,18 @@ func (s *piSession) sendJSON(prompt string) error {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		if s.ctx != nil && s.ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		if s.ctx != nil && s.ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("start: %w", err)
 	}
 
@@ -411,12 +440,21 @@ func (s *piSession) sendJSON(prompt string) error {
 
 	err = cmd.Wait()
 	if err != nil {
+		// CancelTurn (JSON mode) cancels the session context to stop the
+		// one-shot child before handing control back to the engine. Do not
+		// surface that expected process termination as an agent error.
+		if s.ctx != nil && s.ctx.Err() != nil {
+			return nil
+		}
 		slog.Error("piSession: process error", "cmd", s.cmd, "error", err, "stderr", stderrBuf.String())
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s: %w", strings.TrimSpace(stderrBuf.String()), err)}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
 		}
+	}
+	if s.ctx != nil && s.ctx.Err() != nil {
+		return nil
 	}
 
 	// Signal turn completion
@@ -432,9 +470,9 @@ func (s *piSession) sendJSON(prompt string) error {
 
 // writeRPCCommand marshals cmd as a single JSONL line and writes it to the
 // RPC process's stdin under rpcStdinMu. Used by sendRPC (for "prompt"
-// commands during a turn), Steer (for "steer" commands), and startRPC (for
-// the startup "get_state" probe that fetches the session id before callers
-// are released).
+// commands during a turn), Steer (for "steer" commands), CancelTurn (for
+// "abort" commands), and startRPC (for the startup "get_state" probe that
+// fetches the session id before callers are released).
 func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 	if s.rpcStdin == nil {
 		return fmt.Errorf("piSession: RPC stdin is not initialized")
@@ -461,9 +499,56 @@ func (s *piSession) sendRPC(prompt string) error {
 	cmd := map[string]any{
 		"type":    "prompt",
 		"message": prompt,
+		// A prompt can cross the boundary between cc-connect considering a
+		// turn complete and Pi finishing its internal stream (notably after
+		// /stop). Pi rejects a prompt without streamingBehavior while its
+		// AgentSession is still streaming. followUp preserves normal
+		// next-turn semantics while making that handoff durable instead of
+		// surfacing "Agent is already processing" to the user.
+		"streamingBehavior": "followUp",
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
 	return s.writeRPCCommand(cmd)
+}
+
+// CancelTurn aborts the active Pi RPC turn while keeping the persistent
+// session alive. Pi waits for the underlying AgentSession to become idle
+// before accepting the next prompt, so /stop can be followed immediately by
+// another user message without racing a process restart or losing context.
+// One-shot JSON mode cannot preserve the live process, so it cancels and waits
+// for that child, then reports unsupported to make the engine's normal cleanup
+// path run only after the old process has exited.
+func (s *piSession) CancelTurn() error {
+	s.sendMu.Lock()
+	if !s.alive.Load() {
+		s.sendMu.Unlock()
+		return fmt.Errorf("pi: session is closed")
+	}
+	if !s.rpc {
+		// JSON mode has no persistent turn to preserve. Mark this one-shot
+		// session closed and cancel its context, then wait for Send to reap
+		// the child before the engine falls back to normal cleanup. Without
+		// the wait, an immediate resumed prompt can collide with Pi's still
+		// running --session-id process and produce "Agent is already
+		// processing" (exit status 1).
+		s.alive.Store(false)
+		cancel := s.cancel
+		s.sendMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		s.sendWg.Wait()
+		return fmt.Errorf("pi: turn cancellation requires RPC mode: %w", core.ErrNotSupported)
+	}
+	// Keep sendMu held through the wait and abort write. This prevents a new
+	// Send/Steer from being admitted in the gap between the wait and the abort,
+	// which could otherwise put a follow-up prompt ahead of the cancellation.
+	s.sendWg.Wait()
+
+	slog.Debug("piSession: aborting RPC turn")
+	err := s.writeRPCCommand(map[string]any{"type": "abort"})
+	s.sendMu.Unlock()
+	return err
 }
 
 // Steer appends guidance to the active Pi turn without starting another turn.
@@ -471,12 +556,10 @@ func (s *piSession) sendRPC(prompt string) error {
 // assistant turn's tool calls and before the next model call. JSON mode is a
 // one-shot process and has no same-turn steering primitive.
 func (s *piSession) Steer(prompt string) error {
-	s.sendWg.Add(1)
-	defer s.sendWg.Done()
-
-	if !s.alive.Load() {
+	if !s.beginSend() {
 		return fmt.Errorf("pi: session is closed")
 	}
+	defer s.sendWg.Done()
 	if !s.rpc {
 		return fmt.Errorf("pi: steering requires RPC mode: %w", core.ErrNotSupported)
 	}
@@ -1160,7 +1243,9 @@ func (s *piSession) Alive() bool {
 }
 
 func (s *piSession) Close() error {
+	s.sendMu.Lock()
 	s.alive.Store(false)
+	s.sendMu.Unlock()
 
 	// Cancel context to interrupt any in-flight Send() or readLoopRPC.
 	s.cancel()
@@ -1177,6 +1262,19 @@ func (s *piSession) Close() error {
 
 	close(s.events)
 	return nil
+}
+
+// beginSend admits a Send or Steer operation only while the session is alive.
+// Holding sendMu around the WaitGroup increment prevents CancelTurn/Close
+// from returning while a new operation is still about to enter sendWg.
+func (s *piSession) beginSend() bool {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if !s.alive.Load() {
+		return false
+	}
+	s.sendWg.Add(1)
+	return true
 }
 
 // ── ContextUsageReporter ─────────────────────────────────────

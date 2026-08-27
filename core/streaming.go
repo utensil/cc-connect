@@ -12,6 +12,10 @@ import (
 type StreamPreviewCfg struct {
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
+	// DisabledAgents lists agent names for which all live-updating output is
+	// disabled: streaming previews, compact progress messages, and streaming
+	// cards. Names are matched case-insensitively against Agent.Name().
+	DisabledAgents []string
 	IntervalMs        int      // minimum ms between updates (default 1500)
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)
@@ -22,6 +26,7 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 	return StreamPreviewCfg{
 		Enabled:           true,
 		DisabledPlatforms: nil,
+		DisabledAgents:    nil,
 		IntervalMs:        1500,
 		MinDeltaChars:     30,
 		MaxChars:          2000,
