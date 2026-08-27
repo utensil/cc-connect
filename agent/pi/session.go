@@ -431,10 +431,14 @@ func (s *piSession) sendJSON(prompt string) error {
 }
 
 // writeRPCCommand marshals cmd as a single JSONL line and writes it to the
-// RPC process's stdin under rpcStdinMu. Used by both sendRPC (for "prompt"
-// commands during a turn) and startRPC (for the startup "get_state" probe
-// that fetches the session id before callers are released).
+// RPC process's stdin under rpcStdinMu. Used by sendRPC (for "prompt"
+// commands during a turn), Steer (for "steer" commands), and startRPC (for
+// the startup "get_state" probe that fetches the session id before callers
+// are released).
 func (s *piSession) writeRPCCommand(cmd map[string]any) error {
+	if s.rpcStdin == nil {
+		return fmt.Errorf("piSession: RPC stdin is not initialized")
+	}
 	b, err := json.Marshal(cmd)
 	if err != nil {
 		return fmt.Errorf("piSession: marshal command: %w", err)
@@ -459,6 +463,32 @@ func (s *piSession) sendRPC(prompt string) error {
 		"message": prompt,
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
+	return s.writeRPCCommand(cmd)
+}
+
+// Steer appends guidance to the active Pi turn without starting another turn.
+// Pi's RPC mode queues a dedicated "steer" command after the current
+// assistant turn's tool calls and before the next model call. JSON mode is a
+// one-shot process and has no same-turn steering primitive.
+func (s *piSession) Steer(prompt string) error {
+	s.sendWg.Add(1)
+	defer s.sendWg.Done()
+
+	if !s.alive.Load() {
+		return fmt.Errorf("pi: session is closed")
+	}
+	if !s.rpc {
+		return fmt.Errorf("pi: steering requires RPC mode: %w", core.ErrNotSupported)
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return fmt.Errorf("pi: steering prompt is empty")
+	}
+
+	cmd := map[string]any{
+		"type":    "steer",
+		"message": prompt,
+	}
+	slog.Debug("piSession: sending RPC steer", "bytes", len(prompt))
 	return s.writeRPCCommand(cmd)
 }
 

@@ -1,13 +1,17 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +133,109 @@ func TestWorkspaceAgentOptions_DefaultsOmitted(t *testing.T) {
 	}
 	if _, ok := got["thinking"]; ok {
 		t.Errorf("empty thinking should be omitted, got %v", got["thinking"])
+	}
+}
+
+type captureWriteCloser struct {
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (w *captureWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.writes = append(w.writes, append([]byte(nil), p...))
+	w.mu.Unlock()
+	return len(p), nil
+}
+
+func (w *captureWriteCloser) Close() error { return nil }
+
+func (w *captureWriteCloser) lines() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	lines := make([][]byte, len(w.writes))
+	for i := range w.writes {
+		lines[i] = append([]byte(nil), w.writes[i]...)
+	}
+	return lines
+}
+
+func newTestRPCWriterSession(w io.WriteCloser) *piSession {
+	s := &piSession{rpc: true, rpcStdin: w}
+	s.alive.Store(true)
+	return s
+}
+
+func TestPiSession_Steer_RPCCommand(t *testing.T) {
+	w := &captureWriteCloser{}
+	s := newTestRPCWriterSession(w)
+
+	if err := s.Steer("focus on the failing tests"); err != nil {
+		t.Fatalf("Steer() error = %v", err)
+	}
+
+	lines := w.lines()
+	if len(lines) != 1 {
+		t.Fatalf("RPC writes = %d, want 1", len(lines))
+	}
+	var cmd map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(lines[0]), &cmd); err != nil {
+		t.Fatalf("decode steer command: %v", err)
+	}
+	if got := cmd["type"]; got != "steer" {
+		t.Fatalf("command type = %#v, want steer", got)
+	}
+	if got := cmd["message"]; got != "focus on the failing tests" {
+		t.Fatalf("command message = %#v, want exact prompt", got)
+	}
+}
+
+func TestPiSession_Steer_JSONModeUnsupported(t *testing.T) {
+	s := &piSession{}
+	s.alive.Store(true)
+
+	err := s.Steer("focus")
+	if !errors.Is(err, core.ErrNotSupported) {
+		t.Fatalf("Steer() error = %v, want core.ErrNotSupported", err)
+	}
+}
+
+func TestPiSession_SendAndSteer_ConcurrentWritesAreWholeJSONLines(t *testing.T) {
+	w := &captureWriteCloser{}
+	s := newTestRPCWriterSession(w)
+
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			if err := s.Send(fmt.Sprintf("normal-%d", i), nil, nil); err != nil {
+				t.Errorf("Send(%d) error = %v", i, err)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			if err := s.Steer(fmt.Sprintf("steer-%d", i)); err != nil {
+				t.Errorf("Steer(%d) error = %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	lines := w.lines()
+	if len(lines) != 2*n {
+		t.Fatalf("RPC writes = %d, want %d", len(lines), 2*n)
+	}
+	for i, line := range lines {
+		var cmd map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(line), &cmd); err != nil {
+			t.Fatalf("decode RPC write %d: %v (%q)", i, err, line)
+		}
+		typ, _ := cmd["type"].(string)
+		if typ != "prompt" && typ != "steer" {
+			t.Fatalf("RPC write %d type = %q, want prompt or steer", i, typ)
+		}
 	}
 }
 
