@@ -146,9 +146,10 @@ type cujAgentSession struct {
 	pendingDelayMs int
 
 	// observed
-	sentPrompts []string
-	closeCount  int
-	efforts     []string
+	sentPrompts  []string
+	steerPrompts []string
+	closeCount   int
+	efforts      []string
 }
 
 // atomic_bool is intentionally lowercase to avoid clash with stdlib atomic.Bool
@@ -216,6 +217,12 @@ func (s *cujAgentSession) RespondPermission(_ string, _ PermissionResult) error 
 func (s *cujAgentSession) Events() <-chan Event                                 { return s.events }
 func (s *cujAgentSession) CurrentSessionID() string                             { return "cuj-agent-session" }
 func (s *cujAgentSession) Alive() bool                                          { return !s.closed.Get() }
+func (s *cujAgentSession) Steer(prompt string) error {
+	s.mu.Lock()
+	s.steerPrompts = append(s.steerPrompts, prompt)
+	s.mu.Unlock()
+	return nil
+}
 func (s *cujAgentSession) SetLiveReasoningEffort(effort string) bool {
 	s.mu.Lock()
 	s.efforts = append(s.efforts, effort)
@@ -235,6 +242,14 @@ func (s *cujAgentSession) getSentPrompts() []string {
 	defer s.mu.Unlock()
 	out := make([]string, len(s.sentPrompts))
 	copy(out, s.sentPrompts)
+	return out
+}
+
+func (s *cujAgentSession) getSteerPrompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.steerPrompts))
+	copy(out, s.steerPrompts)
 	return out
 }
 
@@ -1194,6 +1209,81 @@ func TestCUJ_A2b_ReasoningChangePreservesConversation(t *testing.T) {
 	env.agent.mu.Unlock()
 	if sessionCount != 1 {
 		t.Fatalf("agent sessions = %d, want the original conversation session", sessionCount)
+	}
+}
+
+// CUJ-A8 · A busy plain-text follow-up is steered into the active turn, then
+// the same session continues with a normal turn and retains its history.
+func TestCUJ_A8_BusyFollowUpSteersCurrentSession(t *testing.T) {
+	env := newCUJEnv(t)
+	env.engine.SetBusyMessageBehavior("steer")
+
+	// Hold the first turn open long enough for the follow-up to arrive while
+	// the session is busy. The fake agent still emits the normal result after
+	// the delay, so the CUJ exercises the real ReceiveMessage/event loop path.
+	env.agent.mu.Lock()
+	env.agent.nextSessionEvents = []Event{{Type: EventResult, Content: "ok", Done: true}}
+	env.agent.nextSessionDelayMs = 250
+	env.agent.mu.Unlock()
+	key := env.userSends("alex", "start the long task")
+	env.waitFor("first turn starts", 2*time.Second, func() bool {
+		env.agent.mu.Lock()
+		sessionCount := len(env.agent.sessions)
+		env.agent.mu.Unlock()
+		return sessionCount == 1 && env.activeSession(key).Busy()
+	})
+
+	ccSessionID := env.activeSession(key).ID
+	env.agent.mu.Lock()
+	liveAgentSession := env.agent.sessions[0]
+	env.agent.mu.Unlock()
+
+	// This is the user action being verified: it must be acknowledged as a
+	// steer, not silently queued or started in a second agent session.
+	env.userSends("alex", "focus on the failing tests")
+	env.waitFor("steer acknowledgement", 2*time.Second, func() bool {
+		return env.sentContains(env.engine.i18n.T(MsgSteerSent))
+	})
+	env.waitFor("first turn settles", 2*time.Second, func() bool {
+		s := env.activeSession(key)
+		return !s.Busy() && len(s.GetHistory(0)) >= 2
+	})
+
+	steers := liveAgentSession.getSteerPrompts()
+	if len(steers) != 1 || !strings.Contains(steers[0], "focus on the failing tests") {
+		t.Fatalf("steer prompts = %#v, want one in-flight steer", steers)
+	}
+	env.agent.mu.Lock()
+	if len(env.agent.sessions) != 1 {
+		env.agent.mu.Unlock()
+		t.Fatalf("agent sessions = %d, want one session", len(env.agent.sessions))
+	}
+	env.agent.mu.Unlock()
+	if got := env.activeSession(key).ID; got != ccSessionID {
+		t.Fatalf("cc session ID changed from %q to %q", ccSessionID, got)
+	}
+	history := env.activeSession(key).GetHistory(0)
+	if len(history) != 2 {
+		t.Fatalf("history after steered turn = %d entries, want initial user+assistant only", len(history))
+	}
+
+	// A subsequent ordinary message must use the same live backend session and
+	// append to the existing local history rather than resetting the turn.
+	liveAgentSession.mu.Lock()
+	liveAgentSession.reply = "second reply"
+	liveAgentSession.mu.Unlock()
+	env.userSends("alex", "continue after the steer")
+	env.waitFor("post-steer reply", 2*time.Second, func() bool {
+		return env.sentContains("second reply") && len(env.activeSession(key).GetHistory(0)) >= 4
+	})
+	env.agent.mu.Lock()
+	if len(env.agent.sessions) != 1 {
+		env.agent.mu.Unlock()
+		t.Fatalf("agent sessions after continuation = %d, want one", len(env.agent.sessions))
+	}
+	env.agent.mu.Unlock()
+	if got := env.activeSession(key).ID; got != ccSessionID {
+		t.Fatalf("cc session ID changed after continuation from %q to %q", ccSessionID, got)
 	}
 }
 

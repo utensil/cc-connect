@@ -11572,14 +11572,13 @@ func TestHandleMessage_BusyBehaviorSteerQueuesNonTextAndStartup(t *testing.T) {
 	}
 }
 
-func TestHandleMessage_BusyBehaviorSteerFailuresDoNotQueue(t *testing.T) {
+func TestHandleMessage_BusyBehaviorSteerFailuresFallBackToQueue(t *testing.T) {
 	tests := []struct {
-		name      string
-		session   AgentSession
-		wantReply MsgKey
+		name    string
+		session AgentSession
 	}{
-		{name: "unsupported", session: &stubAgentSession{}, wantReply: MsgSteerNotSupported},
-		{name: "send error", session: &steerSession{err: errors.New("boom")}, wantReply: MsgSteerSendFailed},
+		{name: "unsupported", session: &stubAgentSession{}},
+		{name: "send error", session: &steerSession{err: errors.New("boom")}},
 	}
 
 	for _, tt := range tests {
@@ -11601,12 +11600,12 @@ func TestHandleMessage_BusyBehaviorSteerFailuresDoNotQueue(t *testing.T) {
 			state.mu.Lock()
 			queued := len(state.pendingMessages)
 			state.mu.Unlock()
-			if queued != 0 {
-				t.Fatalf("pending messages = %d, want none", queued)
+			if queued != 1 {
+				t.Fatalf("pending messages = %d, want one queued fallback", queued)
 			}
 			sent := p.getSent()
-			if len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(tt.wantReply)) {
-				t.Fatalf("sent = %#v, want %q", sent, e.i18n.T(tt.wantReply))
+			if len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+				t.Fatalf("sent = %#v, want queued acknowledgement", sent)
 			}
 		})
 	}

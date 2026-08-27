@@ -10775,13 +10775,17 @@ func (e *Engine) cmdSteer(p Platform, msg *Message, args []string) bool {
 	}
 
 	prompt := e.buildSenderPrompt(text, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
-	e.sendSteer(p, msg, agentSession, prompt)
+	if err := e.sendSteer(p, msg, agentSession, prompt); err != nil {
+		slog.Error("steer: send failed", "error", err)
+		e.replySteerError(p, msg, err)
+	}
 	return true
 }
 
 // steerBusyMessage attempts to steer a plain-text follow-up into the active
-// turn. It returns false only while the agent session is still starting, so the
-// caller can preserve the existing startup queue behavior.
+// turn. It returns false while the agent session is still starting or when the
+// backend cannot accept the steer, so the caller can preserve the message by
+// queueing it for the next turn.
 func (e *Engine) steerBusyMessage(p Platform, msg *Message, interactiveKey string) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[interactiveKey]
@@ -10802,24 +10806,36 @@ func (e *Engine) steerBusyMessage(p Platform, msg *Message, interactiveKey strin
 	}
 
 	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
-	e.sendSteer(p, msg, agentSession, prompt)
+	if err := e.sendSteer(p, msg, agentSession, prompt); err != nil {
+		// A busy-message steer is an optimization over the durable FIFO queue.
+		// If the backend rejects it (including unsupported JSON-mode Pi), let
+		// the caller queue the original message instead of dropping it.
+		slog.Warn("busy steer unavailable; queueing follow-up", "error", err, "session", msg.SessionKey)
+		return false
+	}
 	return true
 }
 
-func (e *Engine) sendSteer(p Platform, msg *Message, agentSession AgentSession, prompt string) {
+func (e *Engine) sendSteer(p Platform, msg *Message, agentSession AgentSession, prompt string) error {
 	steerer, ok := agentSession.(SessionSteerer)
 	if !ok {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerNotSupported))
-		return
+		return ErrNotSupported
 	}
 
 	if err := steerer.Steer(prompt); err != nil {
-		slog.Error("steer: send failed", "error", err)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerSendFailed))
-		return
+		return err
 	}
 
 	e.acknowledgeOrReply(p, msg, MessageAckSteered, MsgSteerSent)
+	return nil
+}
+
+func (e *Engine) replySteerError(p Platform, msg *Message, err error) {
+	if errors.Is(err, ErrNotSupported) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerNotSupported))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerSendFailed))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
