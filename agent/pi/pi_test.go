@@ -1,13 +1,17 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,6 +99,27 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 }
 
+func TestPiSession_NormalizeResponseText(t *testing.T) {
+	s := &piSession{}
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "preserves markdown paragraphs", in: "first\n\nsecond", want: "first\n\nsecond"},
+		{name: "collapses empty paragraphs", in: "first\n\n\n\nsecond\n\n\n", want: "first\n\nsecond"},
+		{name: "normalizes carriage returns", in: "first\r\n\r\n\r\nsecond", want: "first\n\nsecond"},
+		{name: "trims outer whitespace", in: "\n\n answer \n\n", want: "answer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.NormalizeResponseText(tt.in); got != tt.want {
+				t.Fatalf("NormalizeResponseText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkspaceAgentOptions_RpcPropagates(t *testing.T) {
 	// Regression test: rpc must propagate to per-workspace agents
 	// reconstructed by the engine in multi-workspace mode. Without
@@ -129,6 +154,258 @@ func TestWorkspaceAgentOptions_DefaultsOmitted(t *testing.T) {
 	}
 	if _, ok := got["thinking"]; ok {
 		t.Errorf("empty thinking should be omitted, got %v", got["thinking"])
+	}
+}
+
+type captureWriteCloser struct {
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (w *captureWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.writes = append(w.writes, append([]byte(nil), p...))
+	w.mu.Unlock()
+	return len(p), nil
+}
+
+func (w *captureWriteCloser) Close() error { return nil }
+
+func (w *captureWriteCloser) lines() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	lines := make([][]byte, len(w.writes))
+	for i := range w.writes {
+		lines[i] = append([]byte(nil), w.writes[i]...)
+	}
+	return lines
+}
+
+func newTestRPCWriterSession(w io.WriteCloser) *piSession {
+	s := &piSession{rpc: true, rpcStdin: w}
+	s.alive.Store(true)
+	return s
+}
+
+func TestPiSession_Steer_RPCCommand(t *testing.T) {
+	w := &captureWriteCloser{}
+	s := newTestRPCWriterSession(w)
+
+	if err := s.Steer("focus on the failing tests"); err != nil {
+		t.Fatalf("Steer() error = %v", err)
+	}
+
+	lines := w.lines()
+	if len(lines) != 1 {
+		t.Fatalf("RPC writes = %d, want 1", len(lines))
+	}
+	var cmd map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(lines[0]), &cmd); err != nil {
+		t.Fatalf("decode steer command: %v", err)
+	}
+	if got := cmd["type"]; got != "steer" {
+		t.Fatalf("command type = %#v, want steer", got)
+	}
+	if got := cmd["message"]; got != "focus on the failing tests" {
+		t.Fatalf("command message = %#v, want exact prompt", got)
+	}
+}
+
+func TestPiSession_CancelTurn_RPCCommand(t *testing.T) {
+	w := &captureWriteCloser{}
+	s := newTestRPCWriterSession(w)
+
+	if err := s.CancelTurn(); err != nil {
+		t.Fatalf("CancelTurn() error = %v", err)
+	}
+
+	lines := w.lines()
+	if len(lines) != 1 {
+		t.Fatalf("RPC writes = %d, want 1", len(lines))
+	}
+	var cmd map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(lines[0]), &cmd); err != nil {
+		t.Fatalf("decode abort command: %v", err)
+	}
+	if got := cmd["type"]; got != "abort" {
+		t.Fatalf("command type = %#v, want abort", got)
+	}
+}
+
+func TestPiSession_CancelTurn_JSONModeUnsupported(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &piSession{ctx: ctx, cancel: cancel}
+	s.alive.Store(true)
+
+	err := s.CancelTurn()
+	if !errors.Is(err, core.ErrNotSupported) {
+		t.Fatalf("CancelTurn() error = %v, want core.ErrNotSupported", err)
+	}
+	if s.alive.Load() {
+		t.Fatal("CancelTurn() left JSON session alive")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("CancelTurn() did not cancel JSON session context")
+	}
+}
+
+func TestPiSession_CancelTurn_JSONWaitsForSendBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &piSession{ctx: ctx, cancel: cancel}
+	s.alive.Store(true)
+
+	// Model the Send goroutine that is already admitted when /stop arrives.
+	// CancelTurn must not return (and let the engine start a resumed process)
+	// until that goroutine has observed cancellation and left sendWg.
+	s.sendWg.Add(1)
+	returning := make(chan error, 1)
+	go func() { returning <- s.CancelTurn() }()
+
+	select {
+	case err := <-returning:
+		t.Fatalf("CancelTurn() returned before Send finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.sendWg.Done()
+	select {
+	case err := <-returning:
+		if !errors.Is(err, core.ErrNotSupported) {
+			t.Fatalf("CancelTurn() error = %v, want core.ErrNotSupported", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CancelTurn() did not return after Send finished")
+	}
+}
+
+func TestPiSession_CancelTurn_JSONStopsActiveProcess(t *testing.T) {
+	// Exercise the real one-shot process path: cancelling JSON mode must reap
+	// the child before the engine can create a replacement with the same Pi
+	// session id. The marker lets us call CancelTurn only after the child is
+	// definitely running.
+	scriptPath := filepath.Join(t.TempDir(), "fake-pi.sh")
+	markerPath := filepath.Join(t.TempDir(), "started")
+	scriptBody := `#!/bin/sh
+: > "$PI_TEST_MARKER"
+while :; do :; done
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake pi script: %v", err)
+	}
+
+	s, err := newPiSession(context.Background(), scriptPath, nil, t.TempDir(), "", "", "", false, "", []string{"PI_TEST_MARKER=" + markerPath})
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- s.Send("long-running prompt", nil, nil) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(markerPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake Pi process did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := s.CancelTurn(); !errors.Is(err, core.ErrNotSupported) {
+		t.Fatalf("CancelTurn() error = %v, want core.ErrNotSupported", err)
+	}
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("cancelled Send() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled JSON Send() did not finish")
+	}
+	for _, ev := range drainEvents(s) {
+		if ev.Type == core.EventError {
+			t.Fatalf("cancelled JSON Send() emitted EventError: %v", ev.Error)
+		}
+	}
+}
+
+func TestPiSession_Send_RPCPromptUsesFollowUpStreamingBehavior(t *testing.T) {
+	w := &captureWriteCloser{}
+	s := newTestRPCWriterSession(w)
+
+	if err := s.Send("continue after stop", nil, nil); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	lines := w.lines()
+	if len(lines) != 1 {
+		t.Fatalf("RPC writes = %d, want 1", len(lines))
+	}
+	var cmd map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(lines[0]), &cmd); err != nil {
+		t.Fatalf("decode prompt command: %v", err)
+	}
+	if got := cmd["type"]; got != "prompt" {
+		t.Fatalf("command type = %#v, want prompt", got)
+	}
+	if got := cmd["streamingBehavior"]; got != "followUp" {
+		t.Fatalf("streamingBehavior = %#v, want followUp", got)
+	}
+}
+
+func TestPiSession_Steer_JSONModeUnsupported(t *testing.T) {
+	s := &piSession{}
+	s.alive.Store(true)
+
+	err := s.Steer("focus")
+	if !errors.Is(err, core.ErrNotSupported) {
+		t.Fatalf("Steer() error = %v, want core.ErrNotSupported", err)
+	}
+}
+
+func TestPiSession_SendAndSteer_ConcurrentWritesAreWholeJSONLines(t *testing.T) {
+	w := &captureWriteCloser{}
+	s := newTestRPCWriterSession(w)
+
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			if err := s.Send(fmt.Sprintf("normal-%d", i), nil, nil); err != nil {
+				t.Errorf("Send(%d) error = %v", i, err)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			if err := s.Steer(fmt.Sprintf("steer-%d", i)); err != nil {
+				t.Errorf("Steer(%d) error = %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	lines := w.lines()
+	if len(lines) != 2*n {
+		t.Fatalf("RPC writes = %d, want %d", len(lines), 2*n)
+	}
+	for i, line := range lines {
+		var cmd map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(line), &cmd); err != nil {
+			t.Fatalf("decode RPC write %d: %v (%q)", i, err, line)
+		}
+		typ, _ := cmd["type"].(string)
+		if typ != "prompt" && typ != "steer" {
+			t.Fatalf("RPC write %d type = %q, want prompt or steer", i, typ)
+		}
+		if typ == "prompt" && cmd["streamingBehavior"] != "followUp" {
+			t.Fatalf("RPC write %d prompt streamingBehavior = %#v, want followUp", i, cmd["streamingBehavior"])
+		}
 	}
 }
 

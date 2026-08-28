@@ -436,6 +436,13 @@ type AgentSession interface {
 	Close() error
 }
 
+// AgentResponseNormalizer is an optional session capability for agents whose
+// streamed text needs a final transport-specific cleanup before delivery.
+// The normalized text is also what the engine records in local history.
+type AgentResponseNormalizer interface {
+	NormalizeResponseText(text string) string
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

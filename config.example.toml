@@ -241,6 +241,7 @@ level = "info" # debug, info, warn, error
 
 # [stream_preview]
 # enabled = true            # Enable/disable streaming preview (default: true) / 启用/禁用流式预览（默认 true）
+# disabled_agents = ["pi"]  # Disable all live-updating output for these agents (previews, progress, cards); names use Agent.Name()
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
@@ -1806,6 +1807,8 @@ app_secret = "your-feishu-app-secret"
 #     and surfaces them as permission / question cards on the messaging
 #     platform. The user's decision is piped back to Pi via
 #     extension_ui_response. **This is the mode you want.**
+#     Same-turn `/steer` and `queue.busy_behavior = "steer"` also require RPC
+#     mode; JSON mode is a one-shot process and cannot receive steering.
 #     "rpc" 模式：常驻 `pi --mode rpc` 进程，通过 stdin/stdout 走 JSONL
 #     协议。引擎会截获 Pi 的 extension_ui_request 事件，并在消息平台上
 #     渲染为权限 / 询问卡片。用户的决策通过 extension_ui_response 回写到
@@ -1833,7 +1836,7 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# rpc = true                  # enable RPC mode for UI forwarding / 启用 RPC 模式以转发 UI
+# rpc = true                  # enable UI forwarding and same-turn steering / 启用 UI 转发和同回合 steering
 # mode = "default"            # "default" | "yolo"
 # thinking = "high"           # optional / 可选
 # # model = "anthropic/claude-sonnet-4-20250514"  # optional / 可选

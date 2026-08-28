@@ -37,12 +37,66 @@ fallback if a reaction cannot be added.
 ### Default busy-message steering
 
 Set `queue.busy_behavior = "steer"` to inject a plain-text follow-up into the
-active Codex turn by default. Messages with attachments, locations, or a
-session still starting continue to queue safely. Explicit `/steer` remains
-available.
+active steer-capable agent turn by default. Messages with attachments,
+locations, or a session still starting continue to queue safely. If the
+backend rejects the steer, the original follow-up falls back to the durable
+FIFO queue; explicit `/steer` remains available and reports its failure.
 
 - Fork merge commit: [c0c76ab7](https://github.com/utensil/cc-connect/commit/c0c76ab7).
 - Merge record: [PR #1](https://github.com/utensil/cc-connect/pull/1).
+
+### Pi RPC same-turn steering
+
+Pi sessions in persistent RPC mode implement `SessionSteerer` with Pi's native
+`{"type":"steer","message":"..."}` command. The command is queued by Pi
+after the current turn's tool calls and before the next model call, so it does
+not create a second session or turn. One-shot JSON-mode Pi sessions report
+steering as unsupported. Enable `rpc = true` for any Pi agent used with
+`queue.busy_behavior = "steer"` or `/steer`.
+
+- Fork commits: [fc905d32](https://github.com/utensil/cc-connect/commit/fc905d32)
+  (Pi RPC transport) and [213c8d81](https://github.com/utensil/cc-connect/commit/213c8d81)
+  (busy-steer fallback and CUJ coverage), currently on the feature branch.
+- Upstream status: no Pi steering implementation was found in the canonical
+  repository; generic steering API work remains in competing upstream PRs.
+
+### Pi turn cancellation and output policy
+
+Pi RPC prompts always carry Pi's required `streamingBehavior = "followUp"`;
+`/stop` sends the native RPC `abort` and serializes follow-up admission so the
+next prompt cannot race the cancellation. JSON-mode cancellation synchronously
+reaps the one-shot process before the engine falls back to session cleanup.
+Configure `stream_preview.disabled_agents = ["pi"]` when Pi replies should be
+delivered only as final messages: this disables preview edits, compact progress
+edits, and streaming-card updates without an agent-name branch in the engine.
+Pi's session adapter separately compacts runs of blank lines at the response
+boundary, preserving normal Markdown paragraph breaks and history continuity.
+
+- Fork commit: [2605d4e4](https://github.com/utensil/cc-connect/commit/2605d4e4) on `feat/agent-switch-pi` (PR #10).
+- Deployment note: enable the documented setting in each environment that uses
+  Pi with busy-message steering; keep the session store intact during rollout.
+
+### Pi deployment and session-recovery lesson
+
+The Pi transcript on disk and cc-connect's `AgentSessionID` are the continuity
+boundary. A deployment must retain both: do not use `/cancel`, `/new`, or delete
+the Pi session JSONL when recovering a busy session. `/stop` is the preserving
+operation; after the service is idle, one guarded follow-up is safe, but the
+old JSON one-shot transport can still race process reaping.
+
+For a reliable rollout, keep the existing per-agent settings and add
+`rpc = true` under `[projects.agent.options.agents.pi]`. Restart the service
+once after installing the fork binary so the persistent RPC process resumes the
+same session ID. Keep the independent output policy
+`[stream_preview] disabled_agents = ["pi"]` if Pi should emit only final
+messages; response-boundary newline normalization handles excess blank
+paragraphs separately. Verify a normal continuation, a busy follow-up, and a
+stop-then-follow-up sequence all retain one Pi session.
+
+One-shot launchd helpers must capture the daemon result in a non-reserved zsh
+variable such as `exit_code` (not `status`); verify the service restart and
+helper cleanup independently so a post-restart cleanup error cannot be mistaken
+for a failed deployment.
 
 ### Unicode-aware command parsing
 

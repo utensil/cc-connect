@@ -11572,14 +11572,13 @@ func TestHandleMessage_BusyBehaviorSteerQueuesNonTextAndStartup(t *testing.T) {
 	}
 }
 
-func TestHandleMessage_BusyBehaviorSteerFailuresDoNotQueue(t *testing.T) {
+func TestHandleMessage_BusyBehaviorSteerFailuresFallBackToQueue(t *testing.T) {
 	tests := []struct {
-		name      string
-		session   AgentSession
-		wantReply MsgKey
+		name    string
+		session AgentSession
 	}{
-		{name: "unsupported", session: &stubAgentSession{}, wantReply: MsgSteerNotSupported},
-		{name: "send error", session: &steerSession{err: errors.New("boom")}, wantReply: MsgSteerSendFailed},
+		{name: "unsupported", session: &stubAgentSession{}},
+		{name: "send error", session: &steerSession{err: errors.New("boom")}},
 	}
 
 	for _, tt := range tests {
@@ -11601,12 +11600,12 @@ func TestHandleMessage_BusyBehaviorSteerFailuresDoNotQueue(t *testing.T) {
 			state.mu.Lock()
 			queued := len(state.pendingMessages)
 			state.mu.Unlock()
-			if queued != 0 {
-				t.Fatalf("pending messages = %d, want none", queued)
+			if queued != 1 {
+				t.Fatalf("pending messages = %d, want one queued fallback", queued)
 			}
 			sent := p.getSent()
-			if len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(tt.wantReply)) {
-				t.Fatalf("sent = %#v, want %q", sent, e.i18n.T(tt.wantReply))
+			if len(sent) != 1 || !strings.Contains(sent[0], e.i18n.T(MsgMessageQueued)) {
+				t.Fatalf("sent = %#v, want queued acknowledgement", sent)
 			}
 		})
 	}
@@ -14891,6 +14890,43 @@ func TestHandleMessage_InstantReply_SkippedForStreamingCardPlatform(t *testing.T
 		if s == "🤔 Thinking..." {
 			t.Fatalf("instant reply should be skipped for StreamingCardPlatform, but got: %v", sent)
 		}
+	}
+}
+
+func TestHandleMessage_DisabledAgentSkipsStreamingCard(t *testing.T) {
+	p := &stubStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}}
+	agentSession := newResultAgentSession("agent reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetStreamPreviewCfg(StreamPreviewCfg{
+		Enabled:        true,
+		DisabledAgents: []string{"STUB"},
+	})
+
+	msg := &Message{
+		SessionKey: "dingtalk:user1",
+		Platform:   "dingtalk",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for len(p.getSent()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for final reply, got: %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if p.cardCreated {
+		t.Fatal("configured agent policy created a streaming card")
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "agent reply" {
+		t.Fatalf("sent messages = %#v, want one final reply", got)
 	}
 }
 
