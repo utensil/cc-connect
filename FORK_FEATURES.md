@@ -73,8 +73,25 @@ Pi's session adapter separately compacts runs of blank lines at the response
 boundary, preserving normal Markdown paragraph breaks and history continuity.
 
 - Fork commit: [2605d4e4](https://github.com/utensil/cc-connect/commit/2605d4e4) on `feat/agent-switch-pi` (PR #10).
-- Live configuration was intentionally not changed on the development device;
-  enable the documented setting during deployment.
+- Deployment note: enable the documented setting in each environment that uses
+  Pi with busy-message steering; keep the session store intact during rollout.
+
+### Pi deployment and session-recovery lesson
+
+The Pi transcript on disk and cc-connect's `AgentSessionID` are the continuity
+boundary. A deployment must retain both: do not use `/cancel`, `/new`, or delete
+the Pi session JSONL when recovering a busy session. `/stop` is the preserving
+operation; after the service is idle, one guarded follow-up is safe, but the
+old JSON one-shot transport can still race process reaping.
+
+For a reliable rollout, keep the existing per-agent settings and add
+`rpc = true` under `[projects.agent.options.agents.pi]`. Restart the service
+once after installing the fork binary so the persistent RPC process resumes the
+same session ID. Keep the independent output policy
+`[stream_preview] disabled_agents = ["pi"]` if Pi should emit only final
+messages; response-boundary newline normalization handles excess blank
+paragraphs separately. Verify a normal continuation, a busy follow-up, and a
+stop-then-follow-up sequence all retain one Pi session.
 
 ### Unicode-aware command parsing
 
