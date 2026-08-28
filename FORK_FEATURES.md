@@ -93,6 +93,11 @@ messages; response-boundary newline normalization handles excess blank
 paragraphs separately. Verify a normal continuation, a busy follow-up, and a
 stop-then-follow-up sequence all retain one Pi session.
 
+One-shot launchd helpers must capture the daemon result in a non-reserved zsh
+variable such as `exit_code` (not `status`); verify the service restart and
+helper cleanup independently so a post-restart cleanup error cannot be mistaken
+for a failed deployment.
+
 ### Unicode-aware command parsing
 
 Commands split arguments on Unicode whitespace, so pasted Discord text and
