@@ -1446,6 +1446,302 @@ func TestAppServerSessionSend_RequiresExactDeadAgentLoopError(t *testing.T) {
 	}
 }
 
+// waitForAppServerCondition polls until cond holds. Recovery runs off the
+// notification goroutine, so its effects are asynchronous.
+func waitForAppServerCondition(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// rolloverRecorder records the requests a test session wrote and refuses the
+// first refusals steers, the way Codex refuses to steer a compact turn.
+type rolloverRecorder struct {
+	mu       sync.Mutex
+	requests []map[string]any
+	refusals int
+}
+
+func (r *rolloverRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.requests)
+}
+
+func (r *rolloverRecorder) method(i int) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	method, _ := r.requests[i]["method"].(string)
+	return method
+}
+
+func newRolloverTestSession(t *testing.T, refusals int) (*appServerSession, *rolloverRecorder) {
+	t.Helper()
+	rec := &rolloverRecorder{refusals: refusals}
+	var s *appServerSession
+	stdin := &callbackWriteCloser{onWrite: func(p []byte) {
+		var request map[string]any
+		if err := json.Unmarshal(bytes.TrimSpace(p), &request); err != nil {
+			panic(fmt.Sprintf("decode request: %v", err))
+		}
+		rec.mu.Lock()
+		rec.requests = append(rec.requests, request)
+		refused := len(rec.requests) <= rec.refusals
+		rec.mu.Unlock()
+		id := int64(request["id"].(float64))
+		if refused {
+			s.handleResponse(rpcResponseEnvelope{ID: id, Error: &rpcError{Message: "cannot steer a compact turn"}})
+			return
+		}
+		if request["method"] == "turn/start" {
+			s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{"turn":{"id":"turn-1"}}`)})
+			return
+		}
+		s.handleResponse(rpcResponseEnvelope{ID: id, Result: json.RawMessage(`{"turnId":"turn-1"}`)})
+	}}
+	s = newScriptedAppServerSession(t, stdin)
+	s.threadID.Store("thread-1")
+	return s, rec
+}
+
+func waitForRolloverRequests(t *testing.T, rec *rolloverRecorder, want int) {
+	t.Helper()
+	waitForAppServerCondition(t, "rollover requests", func() bool { return rec.count() >= want })
+	if got := rec.count(); got != want {
+		t.Fatalf("requests = %d, want %d", got, want)
+	}
+}
+
+func assertRolloverSteer(t *testing.T, request map[string]any, originalPrompt string) {
+	t.Helper()
+	if got := request["method"]; got != "turn/steer" {
+		t.Fatalf("method = %#v, want turn/steer", got)
+	}
+	params, _ := request["params"].(map[string]any)
+	if params["threadId"] != "thread-1" || params["expectedTurnId"] != "turn-1" {
+		t.Fatalf("params = %#v, want thread-1/turn-1", params)
+	}
+	input, _ := params["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("input = %#v, want a single text element", params["input"])
+	}
+	text, _ := input[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, originalPrompt) || !strings.Contains(text, "rollover") {
+		t.Fatalf("steer text = %q, want rollover framing around the original request", text)
+	}
+}
+
+// A context-window rollover drops the in-flight request, so the session must
+// steer it back into the same turn instead of letting the model answer the
+// environment bootstrap.
+func TestAppServerSession_RolloverRestoresInFlightRequest(t *testing.T) {
+	triggers := map[string]func(*testing.T, *appServerSession){
+		"contextCompaction item": func(t *testing.T, s *appServerSession) {
+			for i := 0; i < 2; i++ {
+				notifyAppServerTest(t, s, "item/completed", map[string]any{
+					"item": map[string]any{"id": "compaction-1", "type": "contextCompaction"},
+				})
+			}
+		},
+		"thread/compacted notification": func(t *testing.T, s *appServerSession) {
+			notifyAppServerTest(t, s, "thread/compacted", map[string]any{})
+			notifyAppServerTest(t, s, "thread/compacted", map[string]any{})
+		},
+	}
+
+	for name, trigger := range triggers {
+		t.Run(name, func(t *testing.T) {
+			s, rec := newRolloverTestSession(t, 0)
+			s.currentTurn = "turn-1"
+			s.inflightPrompt = "compare SpinRep target selection with TCWORK"
+
+			trigger(t, s)
+			// The same rollover must not be recovered twice.
+			waitForRolloverRequests(t, rec, 1)
+			rec.mu.Lock()
+			request := rec.requests[0]
+			rec.mu.Unlock()
+			assertRolloverSteer(t, request, "compare SpinRep target selection with TCWORK")
+		})
+	}
+}
+
+func TestAppServerSession_RolloverWithoutInFlightRequestIsIgnored(t *testing.T) {
+	tests := []struct {
+		name        string
+		currentTurn string
+		prompt      string
+	}{
+		{name: "no active turn", currentTurn: "", prompt: "do the thing"},
+		{name: "turn started indirectly", currentTurn: "turn-1", prompt: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, rec := newRolloverTestSession(t, 0)
+			s.currentTurn = tt.currentTurn
+			s.inflightPrompt = tt.prompt
+
+			notifyAppServerTest(t, s, "item/completed", map[string]any{
+				"item": map[string]any{"id": "compaction-1", "type": "contextCompaction"},
+			})
+			notifyAppServerTest(t, s, "thread/compacted", map[string]any{})
+			time.Sleep(50 * time.Millisecond)
+
+			if got := rec.count(); got != 0 {
+				t.Fatalf("requests = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_RolloverRecoveryIsBoundedPerTurn(t *testing.T) {
+	s, rec := newRolloverTestSession(t, 0)
+	s.currentTurn = "turn-1"
+	s.inflightPrompt = "finish the roadmap admission fix"
+
+	for i := 0; i < 5; i++ {
+		notifyAppServerTest(t, s, "item/completed", map[string]any{
+			"item": map[string]any{"id": fmt.Sprintf("compaction-%d", i), "type": "contextCompaction"},
+		})
+	}
+	waitForRolloverRequests(t, rec, maxRolloverRecoveries)
+
+	// A new turn restores the budget.
+	notifyAppServerTest(t, s, "turn/started", map[string]any{"turn": map[string]any{"id": "turn-2"}})
+	notifyAppServerTest(t, s, "item/completed", map[string]any{
+		"item": map[string]any{"id": "compaction-later", "type": "contextCompaction"},
+	})
+	waitForRolloverRequests(t, rec, maxRolloverRecoveries+1)
+}
+
+// Codex refuses to steer a compact turn, so a refused recovery retries until the
+// rollover is complete.
+func TestAppServerSession_RolloverRecoveryRetriesRefusedSteer(t *testing.T) {
+	s, rec := newRolloverTestSession(t, 1)
+	s.currentTurn = "turn-1"
+	s.inflightPrompt = "compare SpinRep target selection with TCWORK"
+
+	notifyAppServerTest(t, s, "item/completed", map[string]any{
+		"item": map[string]any{"id": "compaction-1", "type": "contextCompaction"},
+	})
+
+	waitForRolloverRequests(t, rec, 2)
+	if got := rec.method(1); got != "turn/steer" {
+		t.Fatalf("second request method = %q, want turn/steer", got)
+	}
+}
+
+// A refused recovery must stop once its turn is gone instead of steering a
+// later turn or retrying forever.
+func TestAppServerSession_RolloverRecoveryStopsWhenTurnEnded(t *testing.T) {
+	s, rec := newRolloverTestSession(t, 1)
+	s.currentTurn = "turn-1"
+	s.inflightPrompt = "summarize the worker events"
+
+	notifyAppServerTest(t, s, "item/completed", map[string]any{
+		"item": map[string]any{"id": "compaction-1", "type": "contextCompaction"},
+	})
+	waitForRolloverRequests(t, rec, 1)
+
+	s.stateMu.Lock()
+	s.currentTurn = ""
+	s.stateMu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+
+	if got := rec.count(); got != 1 {
+		t.Fatalf("requests = %d, want the recovery to stop once the turn ended", got)
+	}
+	if !s.Alive() {
+		t.Fatal("session marked unhealthy after a refused recovery steer")
+	}
+}
+
+// The turn/steer response is delivered by readLoop, the goroutine that
+// dispatches rollover events, so recovery must not run inline on it.
+func TestAppServerSession_RolloverRecoveryDoesNotBlockNotifications(t *testing.T) {
+	var s *appServerSession
+	release := make(chan struct{})
+	stdin := &callbackWriteCloser{onWrite: func(p []byte) {
+		var request map[string]any
+		_ = json.Unmarshal(bytes.TrimSpace(p), &request)
+		id, _ := request["id"].(float64)
+		<-release
+		s.handleResponse(rpcResponseEnvelope{ID: int64(id), Result: json.RawMessage(`{"turnId":"turn-1"}`)})
+	}}
+	s = newScriptedAppServerSession(t, stdin)
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-1"
+	s.inflightPrompt = "summarize the worker events"
+
+	raw, err := json.Marshal(map[string]any{
+		"threadId": "thread-1",
+		"item":     map[string]any{"id": "compaction-1", "type": "contextCompaction"},
+	})
+	if err != nil {
+		t.Fatalf("marshal rollover notification: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleNotification("item/completed", raw)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("rollover recovery blocked the notification path")
+	}
+	close(release)
+}
+
+func TestAppServerSession_SendRecordsInFlightRequestForRollover(t *testing.T) {
+	s, rec := newRolloverTestSession(t, 0)
+	s.promptPreamble = "Project instructions:\nStay precise."
+
+	if err := s.Send("check projects/spinrep for target selection", nil, nil); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	notifyAppServerTest(t, s, "item/completed", map[string]any{
+		"item": map[string]any{"id": "compaction-1", "type": "contextCompaction"},
+	})
+
+	waitForRolloverRequests(t, rec, 2)
+	if got := rec.method(0); got != "turn/start" {
+		t.Fatalf("first request method = %q, want turn/start", got)
+	}
+	rec.mu.Lock()
+	steer := rec.requests[1]
+	rec.mu.Unlock()
+	if got := steer["params"].(map[string]any)["expectedTurnId"]; got != "turn-1" {
+		t.Fatalf("expectedTurnId = %#v, want turn-1", got)
+	}
+	text, _ := steer["params"].(map[string]any)["input"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "check projects/spinrep for target selection") || !strings.Contains(text, "Stay precise.") {
+		t.Fatalf("steer text = %q, want the prompt sent with turn/start", text)
+	}
+
+	// Once the turn completes, the request is no longer in flight.
+	notifyAppServerTest(t, s, "turn/completed", map[string]any{
+		"turn": map[string]any{"id": "turn-1", "status": "completed"},
+	})
+	notifyAppServerTest(t, s, "item/completed", map[string]any{
+		"item": map[string]any{"id": "compaction-2", "type": "contextCompaction"},
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := rec.count(); got != 2 {
+		t.Fatalf("requests after turn completion = %d, want 2", got)
+	}
+}
+
 func newScriptedAppServerSession(t *testing.T, stdin io.WriteCloser) *appServerSession {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

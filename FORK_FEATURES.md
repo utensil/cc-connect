@@ -178,6 +178,14 @@ path.
 - Provenance: not present upstream; reimplemented in this fork after the
   provider's selected-model capacity response was observed in production.
 
+### Codex context-window rollover request recovery
+
+When a Codex turn exhausts its context window, the app server rebuilds the window from an environment bootstrap (memory, project instructions, environment context, plugin suggestions) and does not carry the in-flight user request into it. The model then answers that bootstrap instead of the user, and the turn ends with an unrelated reply; in production it asked which plugin to install. The app-server session now remembers the exact text sent with the active `turn/start` and, on a `contextCompaction` item or a `thread/compacted` notification, steers that original request back into the same turn with explicit rollover framing, retrying a refused steer on a short schedule. Recovery is bounded to three attempts per turn, is skipped when no request is in flight or the turn already completed, and a failed steer keeps the session alive on its existing error path.
+
+- Review: [PR #11](https://github.com/utensil/cc-connect/pull/11) on `fix/codex-compaction-request-recovery`, opened for human review.
+- Merge record: not merged. Add the landed `dev` commit here after review.
+- Provenance: not present upstream; derived from an observed production rollover on 2026-09-14, where a Codex turn answered the environment bootstrap instead of the user request.
+
 ## Maintenance rules
 
 For every new fork feature, add a short behavior description, the commit that

@@ -204,6 +204,13 @@ type appServerSession struct {
 	currentTurn   string
 	preambleSent  bool
 
+	// Context-window rollover recovery: the text sent with the active
+	// turn/start, the rollover already recovered, and how many times this turn
+	// has recovered. See recoverInFlightRequest.
+	inflightPrompt     string
+	lastRolloverID     string
+	rolloverRecoveries int
+
 	capacityRetryAttempt   int
 	capacityRetryScheduled bool
 	capacityRetryInput     []map[string]any
@@ -220,7 +227,25 @@ const (
 	appServerUsageRefreshTimeout   = 1500 * time.Millisecond
 	codexCapacityRetryInitialDelay = time.Second
 	codexCapacityRetryMaxDelay     = 30 * time.Second
+
+	// maxRolloverRecoveries bounds how often one turn may restore its request.
+	maxRolloverRecoveries = 3
+
+	// Codex refuses to steer a compact turn, and a rollover is reported while
+	// the compaction task is still active, so a refused steer is retried.
+	rolloverSteerRetryDelay = 300 * time.Millisecond
 )
+
+var rolloverSteerRetryDelays = []time.Duration{rolloverSteerRetryDelay, 2 * rolloverSteerRetryDelay, 4 * rolloverSteerRetryDelay}
+
+// rolloverRecoveryPrompt carries the request of the active turn into the window
+// that replaced its exhausted one. The framing stays conditional because a
+// compaction that keeps the conversation still holds the request.
+func rolloverRecoveryPrompt(prompt string) string {
+	return "Context window rollover notice: if this window no longer contains the user's original request, " +
+		"resume it now and treat any reply produced from the replacement window as void — a question " +
+		"about plugins or environments is not the user's request. Original request:\n\n" + prompt
+}
 
 func newAppServerSession(ctx context.Context, url, workDir, model string, modelOverride bool, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -603,6 +628,10 @@ func (s *appServerSession) startTurn(input []map[string]any, preambleAdded bool)
 
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
+	if text, ok := input[0]["text"].(string); ok {
+		s.inflightPrompt = strings.TrimSpace(text)
+	}
+	s.lastRolloverID, s.rolloverRecoveries = "", 0
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.fallbackMsgs = s.fallbackMsgs[:0]
 	clear(s.functionCalls)
@@ -1286,6 +1315,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.isCurrentThread(notif.ThreadID) {
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
+			s.lastRolloverID, s.rolloverRecoveries = "", 0
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.fallbackMsgs = s.fallbackMsgs[:0]
 			clear(s.functionCalls)
@@ -1310,6 +1340,9 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.isCurrentThread(notif.ThreadID) {
 			s.completeTurn(notif.Turn.ID, turnCompletionError(notif))
 		}
+
+	case "thread/compacted":
+		s.recoverInFlightRequest("thread/compacted")
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
@@ -1396,6 +1429,10 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if text != "" {
 			s.emit(core.Event{Type: core.EventThinking, Content: text})
 		}
+
+	case "contextCompaction":
+		id, _ := item["id"].(string)
+		s.recoverInFlightRequest(id)
 
 	case "agentMessage":
 		text, _ := item["text"].(string)
@@ -1739,6 +1776,8 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 		return
 	}
 	s.currentTurn = ""
+	s.inflightPrompt = ""
+	s.lastRolloverID, s.rolloverRecoveries = "", 0
 	if turnErr == nil || !isSelectedModelAtCapacityError(turnErr) {
 		s.capacityRetryAttempt = 0
 		s.capacityRetryScheduled = false
@@ -1883,6 +1922,60 @@ func isSelectedModelAtCapacityError(err error) bool {
 		err = errors.Unwrap(err)
 	}
 	return false
+}
+
+// recoverInFlightRequest re-delivers the request of the active turn after a
+// context-window rollover.
+//
+// Codex rebuilds an exhausted window from an environment bootstrap — memory,
+// project instructions, environment context, plugin suggestions — and drops the
+// in-flight request, so the model answers that bootstrap (in production: a
+// question about which plugin to install) and the turn ends with an unrelated
+// reply. Steering the original request back into the same turn restores it.
+// trigger identifies the rollover so one rollover is recovered once.
+func (s *appServerSession) recoverInFlightRequest(trigger string) {
+	s.stateMu.Lock()
+	turnID, prompt := s.currentTurn, s.inflightPrompt
+	recoverable := turnID != "" && prompt != "" &&
+		(trigger == "" || trigger != s.lastRolloverID) &&
+		s.rolloverRecoveries < maxRolloverRecoveries
+	if recoverable {
+		s.lastRolloverID = trigger
+		s.rolloverRecoveries++
+	}
+	s.stateMu.Unlock()
+	if !recoverable {
+		return
+	}
+
+	// readLoop delivers the steer response, so the request must not run inline.
+	go func() {
+		recovery := rolloverRecoveryPrompt(prompt)
+		for attempt := 0; ; attempt++ {
+			s.stateMu.Lock()
+			stale := s.currentTurn != turnID
+			s.stateMu.Unlock()
+			if stale || !s.alive.Load() {
+				return
+			}
+			err := s.Steer(recovery)
+			if err == nil {
+				slog.Info("codex app-server: restored the in-flight request after a context window rollover",
+					"turn_id", turnID, "trigger", trigger, "attempt", attempt+1)
+				return
+			}
+			if attempt >= len(rolloverSteerRetryDelays) {
+				slog.Warn("codex app-server: context window rollover recovery failed",
+					"turn_id", turnID, "trigger", trigger, "attempt", attempt+1, "error", err)
+				return
+			}
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(rolloverSteerRetryDelays[attempt]):
+			}
+		}
+	}()
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
