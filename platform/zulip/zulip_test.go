@@ -54,6 +54,53 @@ func TestNew_AckOptionsOverrideDefaults(t *testing.T) {
 		t.Fatalf("ack overrides = (%q, %q, %q), want (message, check, tada)",
 			p.ackStyle, p.steerAckEmoji, p.queueAckEmoji)
 	}
+	// An explicit empty value keeps the documented default rather than disabling acks.
+	if q := newTestPlatform(t, "http://127.0.0.1:1", map[string]any{"ack_style": ""}); q.ackStyle != "reaction" {
+		t.Fatalf("ack_style=\"\" gave %q, want reaction", q.ackStyle)
+	}
+}
+
+// A typo must fail fast instead of silently keeping reactions (Discord parity).
+func TestNew_RejectsInvalidAckStyle(t *testing.T) {
+	_, err := New(map[string]any{
+		"url":       "http://127.0.0.1:1",
+		"email":     "kepler-bot@example.com",
+		"api_key":   "test-key",
+		"ack_style": "embed",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid ack_style") {
+		t.Fatalf("New() error = %v, want invalid ack_style", err)
+	}
+}
+
+// Direct messages use the same reaction path, addressed by the DM message id.
+func TestAcknowledgeMessage_PrivateContextUsesMessageID(t *testing.T) {
+	var mu sync.Mutex
+	var method, path, body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		method, path, body = r.Method, r.URL.Path, r.PostForm.Encode()
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"success"}`))
+	}))
+	defer server.Close()
+
+	p := newTestPlatform(t, server.URL, nil)
+	rc := replyContext{kind: "private", dmTo: "utensil@example.com", messageID: 42}
+	if !p.AcknowledgeMessage(rc, core.MessageAckQueued) {
+		t.Fatal("AcknowledgeMessage(queued, DM) = false, want handled")
+	}
+	mu.Lock()
+	gotMethod, gotPath, gotBody := method, path, body
+	mu.Unlock()
+	if gotMethod != http.MethodPost || gotPath != "/api/v1/messages/42/reactions" {
+		t.Fatalf("DM reaction request = %s %s", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotBody, "emoji_name=hourglass") {
+		t.Fatalf("DM reaction payload = %q", gotBody)
+	}
 }
 
 // Regression: a steered/queued acknowledgement must be delivered as a reaction on the user's

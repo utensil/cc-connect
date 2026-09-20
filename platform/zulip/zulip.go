@@ -109,10 +109,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	ackStyle := "reaction"
 	if v, ok := opts["ack_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "reaction":
+		case "", "reaction":
 			ackStyle = "reaction"
 		case "message":
 			ackStyle = "message"
+		default:
+			// Fail fast like the Discord platform: a typo must not silently keep reactions
+			// where the operator expected the localized text acknowledgement.
+			return nil, fmt.Errorf("zulip: invalid ack_style %q (want reaction or message)", v)
 		}
 	}
 	steerAckEmoji := "compass"
@@ -406,7 +410,10 @@ func (p *Platform) AcknowledgeMessage(replyCtx any, kind core.MessageAckKind) bo
 	if emoji == "" {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// The engine calls this inline while accepting the user's message, before the turn starts,
+	// so the wait is bounded tightly: a slow realm delays the turn by at most 2s, after which
+	// the engine falls back to its localized text acknowledgement.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := p.addReaction(ctx, rc.messageID, emoji); err != nil {
 		slog.Debug("zulip: ack reaction failed", "kind", string(kind), "emoji", emoji, "error", err)

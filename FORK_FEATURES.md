@@ -70,8 +70,10 @@ not a member, reactions and replies were rejected and previously failed
 silently, because the platform logs send/reaction errors at debug level.
 
 - Pull request: [utensil/cc-connect#12](https://github.com/utensil/cc-connect/pull/12)
-  (branch `fix/zulip-reaction-acks`, commit
-  [ec823af0](https://github.com/utensil/cc-connect/commit/ec823af0)).
+  (branch `fix/zulip-reaction-acks`; the ledger intentionally cites the PR and branch rather
+  than commit hashes, which churn when the branch is rebased onto `dev`).
+  `AcknowledgeMessage` is synchronous with a 2s bound because the engine calls it inline
+  before the turn starts; an invalid `ack_style` is rejected at startup, mirroring Discord.
 - Upstream status: absent from canonical `chenhg5/cc-connect` (`git ls-tree
   canonical/main platform/ | grep zulip` is empty); nothing to cherry-pick, keep
   the platform when syncing upstream.
