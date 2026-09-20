@@ -1281,6 +1281,45 @@ app_secret = "your-feishu-app-secret"
 # proxy_username = ""              # Optional proxy auth username / 代理用户名
 # proxy_password = ""              # Optional proxy auth password / 代理密码
 
+# Zulip (fork-only platform / 本 fork 独有平台)
+# 1. Create a bot in your Zulip realm: Settings > Personal settings > Bots > Add a new bot
+#    (Generic bot); note its email and API key. Realm URL is https://<realm>.zulipchat.com
+#    在 Zulip 中创建机器人：设置 > 个人设置 > 机器人 > 添加新机器人（Generic bot），记下邮箱与 API key。
+# 2. IMPORTANT: subscribe the bot to every stream listed below. Zulip only delivers events for
+#    subscribed streams, and a bot cannot self-subscribe to a private channel (an admin must add
+#    it). Without the subscription the bot receives nothing and reactions/replies are rejected.
+#    重要：务必把机器人加入下方每个 stream 的订阅者；私有 channel 需管理员添加，否则收不到消息。
+# 3. Sessions are topic-scoped: zulip:stream:<stream>:<topic> (DMs: zulip:dm:<email>).
+#    会话按 topic 隔离：zulip:stream:<stream>:<topic>（私聊：zulip:dm:<email>）。
+# 4. Emoji options take Zulip emoji NAMES (emoji_name), not unicode characters.
+#    表情选项使用 Zulip 表情名称（emoji_name），不是 unicode 字符。
+
+# [[projects.platforms]]
+# type = "zulip"
+#
+# [projects.platforms.options]
+# url = "https://utensil.zulipchat.com"       # realm base URL / realm 地址
+# email = "kepler-bot@utensil.zulipchat.com"  # bot email / 机器人邮箱
+# api_key = "your-zulip-bot-api-key"          # bot API key / 机器人 API key
+# streams = ["tasks"]                         # stream allowlist; ["*"] = all / stream 白名单，["*"] 为全部
+# chatmode = "oncall"                         # "oncall" = only @mentions trigger a turn (default)
+#                                             # "all" = every stream message triggers a turn
+#                                             # oncall 仅 @ 触发（默认）；all 每条消息都触发
+# thread_isolation = true                     # topic is the session boundary / 以 topic 为会话边界
+# allow_from = "*"                            # allowed sender emails, comma-separated, or "*"
+#                                             # 允许的发件人邮箱，逗号分隔，或 "*"
+# dm_policy = "open"                          # DMs: "open" | "allowlist" | "closed" / 私聊策略
+# ack_reaction = "eyes"                       # reaction on every inbound message (emoji name)
+#                                             # 收到每条消息时添加的表情回应（emoji 名称）
+# ack_style = "reaction"                      # "reaction" (default) posts steer/queue acks as a
+#                                             # reaction on your message; "message" keeps the text ack
+#                                             # 默认用表情回应代替 “Guidance sent…” 文本确认
+# steer_ack_emoji = "compass"                 # emoji name for steered acks / 引导确认表情
+# queue_ack_emoji = "hourglass"               # emoji name for queued acks / 排队确认表情
+# proxy = ""                                  # optional HTTP/SOCKS5 proxy / 可选代理
+# proxy_username = ""                         # optional proxy auth username / 代理用户名
+# proxy_password = ""                         # optional proxy auth password / 代理密码
+
 # LINE (uncomment to enable / 取消注释以启用)
 # 1. Create a channel at https://developers.line.biz/console/ (Messaging API)
 #    在 LINE Developers 创建 Messaging API Channel

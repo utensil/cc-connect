@@ -7,15 +7,15 @@
 //   - Outbound messages use POST /messages (stream+topic or private DM) and
 //     PATCH /messages/{id} for streaming-preview edits.
 //   - SessionKey scoping mirrors the Discord platform:
-//       thread_isolation=true (default)  ->  zulip:stream:{stream}:{topic}
-//       thread_isolation=false            ->  zulip:stream:{stream}:{topic}:{user_id}
-//       DMs                              ->  zulip:dm:{sender_email}
+//     thread_isolation=true (default)  ->  zulip:stream:{stream}:{topic}
+//     thread_isolation=false            ->  zulip:stream:{stream}:{topic}:{user_id}
+//     DMs                              ->  zulip:dm:{sender_email}
 //     Topics ARE Zulip's thread primitive; treating topic as the isolation key
 //     matches operator expectations and lines up with cc-connect's Discord
 //     thread_isolation semantics.
 //   - Group chatmode:
-//       "oncall" (default) - only messages that mention the bot trigger a turn
-//       "all"              - every stream message triggers a turn
+//     "oncall" (default) - only messages that mention the bot trigger a turn
+//     "all"              - every stream message triggers a turn
 //     DMs always trigger a turn (subject to dm_policy + allow_from).
 package zulip
 
@@ -48,16 +48,23 @@ func init() {
 // ── Config ───────────────────────────────────────────────────────────────────
 
 type Platform struct {
-	baseURL         string
-	email           string
-	apiKey          string
-	authHeader      string
-	allowFrom       string   // comma-separated sender emails or "*"
-	streams         []string // allowlist of stream names; ["*"] = all
-	streamsAll      bool
-	dmPolicy        string // "open" | "allowlist" | "closed"
-	chatmode        string // "oncall" | "all" — for stream messages
-	ackReaction     string // emoji name for inbound ack (empty = disabled)
+	baseURL     string
+	email       string
+	apiKey      string
+	authHeader  string
+	allowFrom   string   // comma-separated sender emails or "*"
+	streams     []string // allowlist of stream names; ["*"] = all
+	streamsAll  bool
+	dmPolicy    string // "open" | "allowlist" | "closed"
+	chatmode    string // "oncall" | "all" — for stream messages
+	ackReaction string // emoji name for inbound ack (empty = disabled)
+	// AGENT-NOTE: reaction-based acknowledgements. Zulip has no typing indicator, so with
+	// ack_style="reaction" the engine's routine steer/queue acknowledgements are delivered as a
+	// reaction on the user's message (see AcknowledgeMessage) instead of a text reply. Emoji
+	// values are Zulip emoji NAMES (sent as `emoji_name`), e.g. compass/hourglass/check/eyes.
+	ackStyle        string // "reaction" (default) | "message"
+	steerAckEmoji   string // emoji name for MessageAckSteered
+	queueAckEmoji   string // emoji name for MessageAckQueued
 	threadIsolation bool
 	http            *http.Client
 
@@ -96,6 +103,30 @@ func New(opts map[string]any) (core.Platform, error) {
 		chatmode = "oncall"
 	}
 	ackReaction, _ := opts["ack_reaction"].(string)
+
+	// Reaction-style acknowledgements (steer/queue), mirroring the Discord platform's
+	// ack_style/steer_ack_emoji/queue_ack_emoji options. Defaults are Zulip-valid emoji names.
+	ackStyle := "reaction"
+	if v, ok := opts["ack_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "reaction":
+			ackStyle = "reaction"
+		case "message":
+			ackStyle = "message"
+		default:
+			// Fail fast like the Discord platform: a typo must not silently keep reactions
+			// where the operator expected the localized text acknowledgement.
+			return nil, fmt.Errorf("zulip: invalid ack_style %q (want reaction or message)", v)
+		}
+	}
+	steerAckEmoji := "compass"
+	if v, ok := opts["steer_ack_emoji"].(string); ok && strings.TrimSpace(v) != "" {
+		steerAckEmoji = strings.TrimSpace(v)
+	}
+	queueAckEmoji := "hourglass"
+	if v, ok := opts["queue_ack_emoji"].(string); ok && strings.TrimSpace(v) != "" {
+		queueAckEmoji = strings.TrimSpace(v)
+	}
 
 	threadIso := true
 	if v, ok := opts["thread_isolation"].(bool); ok {
@@ -147,6 +178,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		dmPolicy:        dmPolicy,
 		chatmode:        chatmode,
 		ackReaction:     ackReaction,
+		ackStyle:        ackStyle,
+		steerAckEmoji:   steerAckEmoji,
+		queueAckEmoji:   queueAckEmoji,
 		threadIsolation: threadIso,
 		http:            client,
 	}, nil
@@ -234,21 +268,21 @@ type eventsResponse struct {
 }
 
 type event struct {
-	ID      int64   `json:"id"`
-	Type    string  `json:"type"`
+	ID      int64         `json:"id"`
+	Type    string        `json:"type"`
 	Message *zulipMessage `json:"message,omitempty"`
 }
 
 type zulipMessage struct {
-	ID              int64           `json:"id"`
-	SenderID        int64           `json:"sender_id"`
-	SenderEmail     string          `json:"sender_email"`
-	SenderFullName  string          `json:"sender_full_name"`
-	Content         string          `json:"content"`
-	Timestamp       int64           `json:"timestamp"`
-	Type            string          `json:"type"` // "stream" | "private"
-	StreamID        int64           `json:"stream_id"`
-	Subject         string          `json:"subject"`
+	ID             int64  `json:"id"`
+	SenderID       int64  `json:"sender_id"`
+	SenderEmail    string `json:"sender_email"`
+	SenderFullName string `json:"sender_full_name"`
+	Content        string `json:"content"`
+	Timestamp      int64  `json:"timestamp"`
+	Type           string `json:"type"` // "stream" | "private"
+	StreamID       int64  `json:"stream_id"`
+	Subject        string `json:"subject"`
 	// display_recipient is a string for streams and an array for DMs; we
 	// only need the stream case, so decode into a raw json.RawMessage and
 	// pull the string out manually.
@@ -339,6 +373,55 @@ func (p *Platform) addReaction(ctx context.Context, id int64, emojiName string) 
 	return p.apiCall(ctx, http.MethodPost, "/messages/"+strconv.FormatInt(id, 10)+"/reactions", body, nil)
 }
 
+// AcknowledgeMessage implements core.MessageAcknowledger. With ack_style="reaction" the
+// engine's routine steer/queue acknowledgement is delivered as a reaction on the user's
+// message instead of a localized text reply, matching the Discord platform's behaviour.
+// Returning false preserves the engine's text fallback (e.g. when the emoji name is not
+// valid on the realm, the message is too old to react to, or a cron job reconstructs a
+// reply context without a message id).
+func (p *Platform) AcknowledgeMessage(replyCtx any, kind core.MessageAckKind) bool {
+	if p.ackStyle != "reaction" {
+		return false
+	}
+	var rc replyContext
+	switch v := replyCtx.(type) {
+	case replyContext:
+		rc = v
+	case *replyContext:
+		if v == nil {
+			return false
+		}
+		rc = *v
+	default:
+		return false
+	}
+	if rc.messageID == 0 {
+		return false
+	}
+	var emoji string
+	switch kind {
+	case core.MessageAckSteered:
+		emoji = p.steerAckEmoji
+	case core.MessageAckQueued:
+		emoji = p.queueAckEmoji
+	default:
+		return false
+	}
+	if emoji == "" {
+		return false
+	}
+	// The engine calls this inline while accepting the user's message, before the turn starts,
+	// so the wait is bounded tightly: a slow realm delays the turn by at most 2s, after which
+	// the engine falls back to its localized text acknowledgement.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := p.addReaction(ctx, rc.messageID, emoji); err != nil {
+		slog.Debug("zulip: ack reaction failed", "kind", string(kind), "emoji", emoji, "error", err)
+		return false
+	}
+	return true
+}
+
 // uploadFile posts a file to /user_uploads and returns the resulting url,
 // which can then be embedded into a Zulip message body as
 //
@@ -412,6 +495,9 @@ type replyContext struct {
 	stream string
 	topic  string
 	dmTo   string // email of the DM peer (for kind="private")
+	// messageID is the inbound Zulip message id. Required by AcknowledgeMessage so routine
+	// steer/queue acknowledgements can be delivered as a reaction on the user's own message.
+	messageID int64
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -569,14 +655,15 @@ func (p *Platform) processMessage(ctx context.Context, m *zulipMessage) {
 	sessionKey := p.buildSessionKey(isStream, streamName, topic, senderEmail, m.SenderID)
 	rctx := replyContext{}
 	if isStream {
-		rctx = replyContext{kind: "stream", stream: streamName, topic: topic}
+		rctx = replyContext{kind: "stream", stream: streamName, topic: topic, messageID: m.ID}
 	} else {
-		rctx = replyContext{kind: "private", dmTo: senderEmail}
+		rctx = replyContext{kind: "private", dmTo: senderEmail, messageID: m.ID}
 	}
 
 	content := stripBotMention(m.Content, p.botFullName.Load().(string))
 
 	coreMsg := &core.Message{
+		MessageID:  strconv.FormatInt(m.ID, 10),
 		SessionKey: sessionKey,
 		Platform:   "zulip",
 		UserID:     strconv.FormatInt(m.SenderID, 10),

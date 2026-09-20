@@ -34,6 +34,53 @@ fallback if a reaction cannot be added.
   `dev` already cover it, so merging it would duplicate/conflict with the
   fork's changes.
 
+### Zulip platform (fork-only) and reaction acknowledgements
+
+`platform/zulip` is a **fork-only** platform: it does not exist in the canonical
+repository (`chenhg5/cc-connect`), so it must be carried across every rebase. It
+uses Zulip's REST event API (`POST /register` plus a long-poll `GET /events`),
+replies with `POST /messages`, edits streaming previews with `PATCH
+/messages/{id}`, and scopes sessions by topic (`zulip:stream:<stream>:<topic>`
+with `thread_isolation = true`; DMs are `zulip:dm:<email>`). `chatmode =
+"oncall"` (mention-only) is the default, `dm_policy` gates DMs, and
+`ack_reaction` reacts to each inbound message with a Zulip emoji name.
+
+Steering and busy-message acknowledgements are delivered as **reactions**,
+matching the Discord behaviour: the platform implements
+`core.MessageAcknowledger`, so a steered or queued follow-up reacts on the
+user's own message instead of posting the localized
+"Guidance sent to the current task." text. Because Zulip has no typing
+indicator, `ack_style = "reaction"` is the platform's default; the text reply
+remains the fallback when a reaction cannot be added (invalid emoji name, stale
+or missing message id, HTTP error). Emoji values are Zulip emoji **names** (sent
+as `emoji_name`), not unicode: `steer_ack_emoji = "compass"` and
+`queue_ack_emoji = "hourglass"` are the defaults, both verified valid against
+the live realm (`hourglass_flowing_sand` and `white_check_mark` do not exist
+there).
+
+The same change closes a message-id gap: `processMessage` now sets
+`core.Message.MessageID` from the Zulip message id (previously empty, so the
+engine logged `msg_id=""` for every Zulip message) and `replyContext` carries
+that id for the ack path.
+
+Operational precondition (Zulip-side, not code): the bot only receives events
+for streams it is **subscribed** to, and it cannot self-subscribe to a private
+channel (`Unable to access channel`); a realm admin must add it. While it was
+not a member, reactions and replies were rejected and previously failed
+silently, because the platform logs send/reaction errors at debug level.
+
+- Pull request: [utensil/cc-connect#12](https://github.com/utensil/cc-connect/pull/12)
+  (branch `fix/zulip-reaction-acks`; the ledger intentionally cites the PR and branch rather
+  than commit hashes, which churn when the branch is rebased onto `dev`).
+  `AcknowledgeMessage` is synchronous with a 2s bound because the engine calls it inline
+  before the turn starts; an invalid `ack_style` is rejected at startup, mirroring Discord.
+- Upstream status: absent from canonical `chenhg5/cc-connect` (`git ls-tree
+  canonical/main platform/ | grep zulip` is empty); nothing to cherry-pick, keep
+  the platform when syncing upstream.
+- Config reference: `config.example.toml` now documents the platform, including
+  the subscription precondition (before this change the platform had no example
+  anywhere in the repository).
+
 ### Default busy-message steering
 
 Set `queue.busy_behavior = "steer"` to inject a plain-text follow-up into the
