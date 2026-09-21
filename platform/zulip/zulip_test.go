@@ -279,3 +279,117 @@ func TestProcessMessage_SetsMessageIDAndInboundReaction(t *testing.T) {
 		t.Fatal("inbound ack reaction was not posted")
 	}
 }
+
+// A mention must be removed in every rendered form, otherwise the content does
+// not start with "/" and slash commands are dispatched to the agent as prompts.
+func TestStripBotMention(t *testing.T) {
+	const bot = "🔭 Kepler(开开)"
+	// The exact content Zulip delivered for the 2026-09-21 09:25 turn: the
+	// id-qualified mention form used to survive as "🔭 Kepler(开开)|1204512** …"
+	// (53 bytes), so `/model gpt-5.6-luna max` ran as a prompt.
+	const idMention = "@**" + bot + "|1204512** /model gpt-5.6-luna max"
+
+	tests := []struct {
+		name    string
+		bot     string
+		content string
+		want    string
+	}{
+		{"plain command", bot, "@**" + bot + "** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
+		{"silent command", bot, "@_**" + bot + "** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
+		{"id-qualified command", bot, idMention, "/model gpt-5.6-luna max"},
+		{"silent id-qualified command", bot, "@_**" + bot + "|1204512** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
+		{"no separator space", bot, "@**" + bot + "|1204512**/model gpt-5.6-luna", "/model gpt-5.6-luna"},
+		{"mention only", bot, "@**" + bot + "**", ""},
+		{"id-qualified mention only", bot, "@**" + bot + "|1204512**", ""},
+		{"mid-message mention", bot, "please @**" + bot + "** run the suite", "please run the suite"},
+		{"digression after mention", bot, "@**" + bot + "**\n\nwhat changed?", "what changed?"},
+		{"other user untouched", bot, "@**Someone Else** /model gpt-5.6-luna", "@**Someone Else** /model gpt-5.6-luna"},
+		// The mention must be anchored to Zulip's grammar: text that merely
+		// follows the bot's name is not part of a mention of this bot.
+		{"name-extending user untouched", bot, "@**" + bot + " Extra** /model gpt-5.6-luna", "@**" + bot + " Extra** /model gpt-5.6-luna"},
+		{"later own mention still stripped", bot, "@**" + bot + " Extra** hi @**" + bot + "** /model x", "@**" + bot + " Extra** hi /model x"},
+		{"bare prefix before code fence untouched", bot, "```\n@**" + bot + "\n```\nand **bold** after", "```\n@**" + bot + "\n```\nand **bold** after"},
+		{"id segment without closing untouched", bot, "@**" + bot + "| and **bold**", "@**" + bot + "| and **bold**"},
+		{"later bold stays after mention", bot, "@**" + bot + "|1204512** **bold**", "**bold**"},
+		{"mentioned twice", bot, "@**" + bot + "** ping @**" + bot + "|7** again", "ping again"},
+		{"malformed mention untouched", bot, "@**" + bot, "@**" + bot},
+		{"empty bot name only trims", "", "  /model gpt-5.6-luna  ", "/model gpt-5.6-luna"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripBotMention(tt.content, tt.bot); got != tt.want {
+				t.Fatalf("stripBotMention(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// isMentioned must agree with stripBotMention about the id-qualified mention
+// form, since chatmode=oncall drops stream messages that fail this check.
+func TestIsMentioned(t *testing.T) {
+	const bot = "🔭 Kepler(开开)"
+	p := newTestPlatform(t, "http://127.0.0.1:1", nil)
+	p.botFullName.Store(bot)
+
+	mentioned := []string{
+		"@**" + bot + "** hello",
+		"@**" + bot + "|1204512** /model gpt-5.6-luna max",
+	}
+	for _, c := range mentioned {
+		if !p.isMentioned(c) {
+			t.Errorf("isMentioned(%q) = false, want true", c)
+		}
+	}
+	// Observed behaviour rather than asserted intent: a Zulip silent mention
+	// suppresses notification and isMentioned does not treat it as a trigger, so
+	// under the default chatmode=oncall a silent mention gets no reply at all.
+	// stripBotMention still removes it from a turn started for another reason;
+	// whether a silent mention should trigger is a product decision left alone
+	// here.
+	notTriggering := []string{
+		"@_**" + bot + "** hello",
+		"@**Someone Else** hello",
+	}
+	for _, c := range notTriggering {
+		if p.isMentioned(c) {
+			t.Errorf("isMentioned(%q) = true, want false", c)
+		}
+	}
+}
+
+// The user-visible contract, exercised through the real inbound path: a
+// mentioned slash command must reach the engine as a command. The content below
+// is byte-for-byte msg 625614213, which used to be handed to the agent as
+// "🔭 Kepler(开开)|1204512** /model gpt-5.6-luna max" (content_len=53).
+func TestProcessMessage_StripsIdQualifiedMentionBeforeDispatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"success"}`))
+	}))
+	defer server.Close()
+
+	p := newTestPlatform(t, server.URL, map[string]any{"streams": []any{"tasks"}})
+	p.botFullName.Store("🔭 Kepler(开开)")
+
+	var got *core.Message
+	p.handler = func(_ core.Platform, m *core.Message) { got = m }
+
+	p.processMessage(context.Background(), &zulipMessage{
+		ID:               625614213,
+		SenderID:         1054187,
+		SenderEmail:      "utensil@example.com",
+		SenderFullName:   "Utensil Song",
+		Content:          "@**🔭 Kepler(开开)|1204512** /model gpt-5.6-luna max",
+		Type:             "stream",
+		Subject:          "zulip-api",
+		DisplayRecipient: json.RawMessage(`"tasks"`),
+	})
+
+	if got == nil {
+		t.Fatal("message handler was not called (mention not recognised?)")
+	}
+	if got.Content != "/model gpt-5.6-luna max" {
+		t.Fatalf("core.Message.Content = %q, want %q", got.Content, "/model gpt-5.6-luna max")
+	}
+}
