@@ -69,6 +69,16 @@ channel (`Unable to access channel`); a realm admin must add it. While it was
 not a member, reactions and replies were rejected and previously failed
 silently, because the platform logs send/reaction errors at debug level.
 
+Event-queue recovery (2026-09-21): Zulip garbage-collects idle event queues, and
+the poll loop used to retry a rejected queue forever because it searched the
+error *text* for the machine code `BAD_EVENT_QUEUE_ID` while `apiCallRaw` only
+embedded Zulip's human-readable `msg`. A quiet realm therefore deafened the
+Zulip side until a daemon restart. `apiCallRaw` now returns a typed
+`zulipAPIError` carrying `code`, `isQueueGone` recognises the code (with the
+text as fallback), the loop re-registers with a one-second settle, and three
+consecutive `/events` failures are escalated to an ERROR line so an unresponsive
+Zulip connection cannot sit silently in the log.
+
 - Pull request: [utensil/cc-connect#12](https://github.com/utensil/cc-connect/pull/12)
   (branch `fix/zulip-reaction-acks`; the ledger intentionally cites the PR and branch rather
   than commit hashes, which churn when the branch is rebased onto `dev`).
