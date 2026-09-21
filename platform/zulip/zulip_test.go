@@ -3,6 +3,8 @@ package zulip
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,6 +102,59 @@ func TestAcknowledgeMessage_PrivateContextUsesMessageID(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, "emoji_name=hourglass") {
 		t.Fatalf("DM reaction payload = %q", gotBody)
+	}
+}
+
+// Regression: an expired Zulip event queue must be recognised so the poll loop re-registers.
+// The old check searched the error text for "BAD_EVENT_QUEUE_ID", but apiCallRaw only embedded the
+// human-readable msg, so the queue was retried forever and Zulip inbound stayed dead until a
+// restart.
+func TestIsQueueGone(t *testing.T) {
+	coded := &zulipAPIError{Status: http.StatusBadRequest, Code: "BAD_EVENT_QUEUE_ID", Msg: "Bad Request: Bad event queue ID: 7addfd0b"}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"typed code", coded, true},
+		{"wrapped typed code", fmt.Errorf("zulip GET /events: %w", coded), true},
+		{"plain 400 without code", &zulipAPIError{Status: http.StatusBadRequest, Msg: "Bad Request: Bad event queue ID: x"}, true},
+		{"400 with unrelated code", &zulipAPIError{Status: http.StatusBadRequest, Code: "BAD_REQUEST", Msg: "Malformed request"}, false},
+		{"server error", &zulipAPIError{Status: http.StatusInternalServerError, Code: "INTERNAL_ERROR", Msg: "boom"}, false},
+		{"text-only fallback", errors.New("zulip GET /events: 400 400 Bad Request: Bad event queue ID: abc"), true},
+		{"unrelated error", errors.New("zulip GET /events: dial tcp: no route to host"), false},
+	}
+	for _, c := range cases {
+		if got := isQueueGone(c.err); got != c.want {
+			t.Errorf("isQueueGone(%s) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// End-to-end regression for the same bug: the platform must expose Zulip's machine-readable code
+// (not just its msg text) so the poll loop can act on it.
+func TestAPICall_ExposesZulipErrorCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"result":"error","code":"BAD_EVENT_QUEUE_ID","msg":"Bad event queue ID: 7addfd0b-08e4-46d7-ba94-c4d023f58d42"}`))
+	}))
+	defer server.Close()
+
+	p := newTestPlatform(t, server.URL, nil)
+	err := p.apiCall(context.Background(), http.MethodGet, "/events?queue_id=7addfd0b", nil, nil)
+	if err == nil {
+		t.Fatal("apiCall() error = nil, want a Zulip API error")
+	}
+	var apiErr *zulipAPIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error %v does not carry a *zulipAPIError", err)
+	}
+	if apiErr.Code != "BAD_EVENT_QUEUE_ID" {
+		t.Fatalf("exposed code = %q, want BAD_EVENT_QUEUE_ID", apiErr.Code)
+	}
+	if !isQueueGone(err) {
+		t.Fatal("isQueueGone() = false for an expired queue; the poll loop would retry it forever")
 	}
 }
 

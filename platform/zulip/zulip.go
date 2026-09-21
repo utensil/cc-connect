@@ -194,6 +194,45 @@ func (p *Platform) Name() string { return "zulip" }
 // encoded as application/x-www-form-urlencoded. The response body is JSON-
 // decoded into out. A non-2xx response is returned as an error whose text
 // includes any msg field from the Zulip payload.
+// zulipAPIError is a non-2xx Zulip response. Code carries Zulip's machine-readable error code
+// (for example BAD_EVENT_QUEUE_ID), which is stable across releases and translations, unlike the
+// human-readable Msg.
+type zulipAPIError struct {
+	Status int
+	Code   string
+	Msg    string
+}
+
+func (e *zulipAPIError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("%d: %s: %s", e.Status, e.Code, e.Msg)
+	}
+	return fmt.Sprintf("%d: %s", e.Status, e.Msg)
+}
+
+// isQueueGone reports whether an /events failure means the event queue no longer exists and the
+// caller must drop it and register a new one.
+//
+// Regression note: the previous check looked for "BAD_EVENT_QUEUE_ID" inside the error text, but
+// apiCallRaw only put Zulip's human-readable msg there ("Bad event queue ID: …"), so an expired
+// queue retried forever with a one-minute backoff and Zulip inbound stayed dead until a restart.
+// The machine-readable code is now carried in a typed error; the text check remains only as a
+// fallback for responses that carry no code. Verified against a live realm: an unknown queue
+// returns 400 with code "BAD_EVENT_QUEUE_ID" and msg "Bad event queue ID: <id>".
+func isQueueGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *zulipAPIError
+	if errors.As(err, &apiErr) && apiErr.Code == "BAD_EVENT_QUEUE_ID" {
+		return true
+	}
+	// A blanket "any 400 means the queue is gone" rule was rejected in review: a 400 caused by
+	// anything else would make the poll loop re-register in a tight cycle.
+	msg := err.Error()
+	return strings.Contains(msg, "BAD_EVENT_QUEUE_ID") || strings.Contains(msg, "Bad event queue ID")
+}
+
 func (p *Platform) apiCall(ctx context.Context, method, path string, body url.Values, out any) error {
 	return p.apiCallRaw(ctx, method, path, body, out, "")
 }
@@ -235,7 +274,13 @@ func (p *Platform) apiCallRaw(ctx context.Context, method, path string, body url
 		if msg == "" {
 			msg = strings.TrimSpace(string(raw))
 		}
-		return fmt.Errorf("zulip %s %s: %d %s: %s", method, path, res.StatusCode, res.Status, msg)
+		// Keep the historical text shape (method, path, status) while exposing the
+		// machine-readable code to callers through errors.As.
+		return fmt.Errorf("zulip %s %s: %w", method, path, &zulipAPIError{
+			Status: res.StatusCode,
+			Code:   errPayload.Code,
+			Msg:    fmt.Sprintf("%s: %s", res.Status, msg),
+		})
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
@@ -525,7 +570,11 @@ func (p *Platform) pollLoop(ctx context.Context) {
 	var queueID string
 	var lastEventID int64 = -1
 	backoff := time.Second
+	consecutiveEventsFailures := 0
 	const maxBackoff = 60 * time.Second
+	// After this many consecutive /events failures the platform is deaf to Zulip inbound, which
+	// used to stay silent in the log; surface it once at ERROR so it cannot go unnoticed.
+	const eventsFailureEscalationThreshold = 3
 
 	defer func() {
 		if queueID != "" {
@@ -566,12 +615,19 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			msg := err.Error()
-			// The event queue can expire; drop it and re-register.
-			if strings.Contains(msg, "BAD_EVENT_QUEUE_ID") {
-				slog.Info("zulip: queue expired, re-registering")
+			// The event queue can expire (or be rejected); drop it and register a fresh one.
+			if isQueueGone(err) {
+				slog.Warn("zulip: event queue rejected, re-registering", "error", err)
 				queueID = ""
+				// Settle briefly so a realm that keeps rejecting queues cannot drive a tight
+				// register/reject cycle.
+				sleepCtx(ctx, time.Second)
 				continue
+			}
+			consecutiveEventsFailures++
+			if consecutiveEventsFailures == eventsFailureEscalationThreshold {
+				slog.Error("zulip: /events failing repeatedly — Zulip inbound is deaf until it recovers",
+					"error", err, "consecutive_failures", consecutiveEventsFailures, "backoff", backoff)
 			}
 			slog.Warn("zulip: /events failed", "error", err, "backoff", backoff)
 			sleepCtx(ctx, backoff)
@@ -579,6 +635,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
+		consecutiveEventsFailures = 0
 
 		for _, ev := range events {
 			if ev.ID > lastEventID {
