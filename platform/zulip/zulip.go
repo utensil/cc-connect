@@ -764,8 +764,9 @@ func (p *Platform) isMentioned(content string) bool {
 		return false
 	}
 	c := strings.ToLower(content)
-	// Zulip renders mentions as @**Full Name** and @**Full Name|user_id**;
-	// after HTML → text extraction both reduce to the same substring.
+	// Zulip renders a mention as @**Full Name** and @**Full Name|user_id**;
+	// the id-qualified form is what the events API delivers when the name alone
+	// is not unique, so it has to count as a mention here too.
 	return strings.Contains(c, "@**"+full+"**") || strings.Contains(c, "@**"+full+"|")
 }
 
@@ -774,26 +775,46 @@ func (p *Platform) isMentioned(content string) bool {
 //
 // Zulip writes a mention as @**Full Name** (@_**Full Name** when silent) and
 // qualifies it with the user id when the name is not unique: @**Full Name|id**.
-// For the id-qualified form the mention must be cut at the "**" that follows
-// the name; the opening "**" is the first "**" in the span, and stopping there
-// left "Full Name|id**" behind, so the content no longer began with "/" and
-// `/model …` was dispatched to the agent as a prompt. (AGENT-NOTE: keep the
-// end-of-mention search anchored after the name.)
+// The mention must be cut at the closing "**" that follows the name; the opening
+// "**" is the first "**" in the span, and stopping there left "Full Name|id**"
+// behind, so the content no longer began with "/" and `/model …` was dispatched
+// to the agent as a prompt. (AGENT-NOTE: keep the end of a mention anchored to
+// Zulip's mention grammar. An unanchored search for the next "**" would swallow
+// text that is not part of the mention: a code fence, later bold text, or the
+// mention of another user whose name extends this bot's name.)
 func stripBotMention(content, botFullName string) string {
 	botFullName = strings.TrimSpace(botFullName)
 	if botFullName == "" {
 		return strings.TrimSpace(content)
 	}
+	// Mention prefixes in Zulip's grammar. A mention of somebody else whose name
+	// starts with this bot's name, e.g. "@**Name Extra**", must not match: this
+	// bot's own mention continues with "**", its id-qualified form with "|",
+	// and anything else means the mention belongs to another user.
 	for _, prefix := range []string{"@**" + botFullName, "@_**" + botFullName} {
-		for {
-			idx := strings.Index(content, prefix)
-			if idx < 0 {
+		for from := 0; from < len(content); {
+			rel := strings.Index(content[from:], prefix)
+			if rel < 0 {
 				break
 			}
+			idx := from + rel
 			rest := content[idx+len(prefix):]
-			end := strings.Index(rest, "**")
+			end := -1
+			switch {
+			case strings.HasPrefix(rest, "**"): // @**Full Name**
+				end = 0
+			case strings.HasPrefix(rest, "|"): // @**Full Name|user_id**
+				// The id segment is a single token; requiring that keeps a
+				// stray "@**Name|" from eating a later "**".
+				if i := strings.IndexAny(rest[1:], " \t\n*"); i > 0 {
+					if strings.HasPrefix(rest[1+i:], "**") {
+						end = 1 + i
+					}
+				}
+			}
 			if end < 0 {
-				break // malformed mention without a closing ** — leave it untouched
+				from = idx + len(prefix) // not this bot's mention — keep looking
+				continue
 			}
 			tail := rest[end+2:]
 			// Swallow the separator space so "@**Name|id** /model x" becomes
@@ -802,6 +823,7 @@ func stripBotMention(content, botFullName string) string {
 				tail = tail[1:]
 			}
 			content = content[:idx] + tail
+			from = idx
 		}
 	}
 	return strings.TrimSpace(content)
