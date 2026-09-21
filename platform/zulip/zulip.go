@@ -769,22 +769,39 @@ func (p *Platform) isMentioned(content string) bool {
 	return strings.Contains(c, "@**"+full+"**") || strings.Contains(c, "@**"+full+"|")
 }
 
+// stripBotMention removes this bot's own mention from an inbound message so that
+// a mentioned slash command still reaches the engine as a command.
+//
+// Zulip writes a mention as @**Full Name** (@_**Full Name** when silent) and
+// qualifies it with the user id when the name is not unique: @**Full Name|id**.
+// For the id-qualified form the mention must be cut at the "**" that follows
+// the name; the opening "**" is the first "**" in the span, and stopping there
+// left "Full Name|id**" behind, so the content no longer began with "/" and
+// `/model …` was dispatched to the agent as a prompt. (AGENT-NOTE: keep the
+// end-of-mention search anchored after the name.)
 func stripBotMention(content, botFullName string) string {
+	botFullName = strings.TrimSpace(botFullName)
 	if botFullName == "" {
 		return strings.TrimSpace(content)
 	}
-	patterns := []string{
-		"@**" + botFullName + "**",
-		"@_**" + botFullName + "**", // silent mention
-	}
-	for _, pat := range patterns {
-		content = strings.ReplaceAll(content, pat, "")
-	}
-	// Also strip @**Name|user_id** variants.
-	if idx := strings.Index(content, "@**"+botFullName+"|"); idx >= 0 {
-		end := strings.Index(content[idx:], "**")
-		if end > 0 {
-			content = content[:idx] + content[idx+end+2:]
+	for _, prefix := range []string{"@**" + botFullName, "@_**" + botFullName} {
+		for {
+			idx := strings.Index(content, prefix)
+			if idx < 0 {
+				break
+			}
+			rest := content[idx+len(prefix):]
+			end := strings.Index(rest, "**")
+			if end < 0 {
+				break // malformed mention without a closing ** — leave it untouched
+			}
+			tail := rest[end+2:]
+			// Swallow the separator space so "@**Name|id** /model x" becomes
+			// "/model x" and "hi @**Name** there" becomes "hi there".
+			if strings.HasPrefix(tail, " ") && (idx == 0 || content[idx-1] == ' ' || content[idx-1] == '\n') {
+				tail = tail[1:]
+			}
+			content = content[:idx] + tail
 		}
 	}
 	return strings.TrimSpace(content)
