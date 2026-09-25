@@ -179,8 +179,8 @@ returns true: a thinking-level change never needs a history wipe, because RPC
 sessions apply it in place and one-shot json sessions resume the same Pi
 session id with a new `--thinking` flag.
 
-- Fork commit: [see `feat/pi-live-model-switch`](https://github.com/utensil/cc-connect/commits/feat/pi-live-model-switch).
-- Merge record: (this feature's PR) — see the pull request that landed this entry.
+- Fork commit: [c30e33c8](https://github.com/utensil/cc-connect/commit/c30e33c8) on `feat/pi-live-model-switch`.
+- Merge record: [PR #16](https://github.com/utensil/cc-connect/pull/16).
 - Provenance: not present upstream, and not present in the related fork. Pi's
   RPC protocol ships `set_model`, `set_thinking_level`, and
   `get_available_models`, but no cc-connect agent used them; upstream's live
