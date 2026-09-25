@@ -155,6 +155,37 @@ variable such as `exit_code` (not `status`); verify the service restart and
 helper cleanup independently so a post-restart cleanup error cannot be mistaken
 for a failed deployment.
 
+### Pi live model and thinking switching (session-scoped)
+
+`/model <model>` and `/reasoning <level>` on a Pi session apply to the running
+conversation instead of tearing it down. `piSession` implements
+`core.LiveModelSwitcher` and `core.LiveReasoningEffortSwitcher` through Pi's
+RPC commands `{"type":"set_model","provider":…,"modelId":…}` and
+`{"type":"set_thinking_level","level":…}`. Replies are matched by request id,
+so a switch is reported as applied only when Pi confirms it; an unanswered or
+rejected switch returns false and the engine keeps its previous respawn
+fallback. A bare model id (as used by `[projects.agent.options.agents.pi]
+model` and `/model`) is resolved to Pi's provider+id pair through
+`get_available_models`, cached per session; a `provider/id` string needs no
+lookup.
+
+The Pi agent also implements `core.SessionModelStarter` and
+`core.SessionRuntimeStarter`, so a session's persisted model/reasoning override
+is honoured when its process is (re)spawned. Before this, the override was
+silently dropped at spawn (the engine fell through to a plain `StartSession`)
+and a reasoning override made cron/per-session starts fail with "does not
+support per-session reasoning". `PreservesSessionOnReasoningEffortChange`
+returns true: a thinking-level change never needs a history wipe, because RPC
+sessions apply it in place and one-shot json sessions resume the same Pi
+session id with a new `--thinking` flag.
+
+- Fork commit: [c30e33c8](https://github.com/utensil/cc-connect/commit/c30e33c8) on `feat/pi-live-model-switch`.
+- Merge record: [PR #16](https://github.com/utensil/cc-connect/pull/16).
+- Provenance: not present upstream, and not present in the related fork. Pi's
+  RPC protocol ships `set_model`, `set_thinking_level`, and
+  `get_available_models`, but no cc-connect agent used them; upstream's live
+  model switching is Codex-only (`core.LiveModelSwitcher`).
+
 ### Unicode-aware command parsing
 
 Commands split arguments on Unicode whitespace, so pasted Discord text and
@@ -327,6 +358,15 @@ unchanged). Both changes are per-session overrides like the plain `/model`.
 `TempDir RemoveAll cleanup: directory not empty` on macOS. Reproduces on clean
 `origin/dev` (fc22b8b) — unrelated to /agent switching. Run the failing tests
 in isolation (`-run 'TestCUJ'`) to confirm green.
+
+`agent/pi TestHandleMessageUpdate_ThinkingAccumulation` fails deterministically
+(not intermittently) on clean `origin/dev` (bd0b973a): it expects
+`thinking_end` with no following tool call to emit an accumulated
+`EventThinking`, while `pendingThinking` intentionally drops that block unless a
+tool call follows in the same turn. Reproduced in an isolated worktree at that
+base ref before the Pi live-switching change, so it is a stale test, not a
+regression from it. Do not use the full `agent/pi` package run as a green gate
+until the test is either updated or retired.
 
 ### `[projects.display]` applied at engine startup
 

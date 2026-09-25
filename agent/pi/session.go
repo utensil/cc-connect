@@ -89,6 +89,26 @@ type piSession struct {
 	stderrBuf  cappedStderrWriter
 	rpcReady   chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
 
+	// cfgMu guards model/thinking once the session is live: a live model or
+	// thinking switch (core.LiveModelSwitcher / core.LiveReasoningEffortSwitcher)
+	// rewrites them for the next spawn while startRPC/sendJSON read them from a
+	// send goroutine.
+	cfgMu sync.RWMutex
+
+	// rpcReplyMu guards rpcReplies, which routes a {"type":"response"} frame to
+	// the caller whose request id it matches (callRPC). Without it, a live
+	// switch could only fire-and-forget and would have to report success it
+	// never verified.
+	rpcReplyMu sync.Mutex
+	rpcReplies map[string]chan rpcReply
+	rpcReqSeq  uint64
+
+	// catalogMu guards catalog: Pi's model list, fetched via
+	// get_available_models and used to resolve a bare model id to the provider
+	// set_model requires.
+	catalogMu sync.Mutex
+	catalog   []piModelRef
+
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
 	extPending    map[string]string // Pi ext_ui_id -> cc-conn RequestID
@@ -172,11 +192,12 @@ func (s *piSession) startRPC(resumeID string) error {
 	if resumeID != "" {
 		args = append(args, "--session-id", resumeID)
 	}
-	if s.model != "" {
-		args = append(args, "--model", s.model)
+	model, thinking := s.modelAndThinking()
+	if model != "" {
+		args = append(args, "--model", model)
 	}
-	if s.thinking != "" {
-		args = append(args, "--thinking", s.thinking)
+	if thinking != "" {
+		args = append(args, "--thinking", thinking)
 	}
 
 	slog.Debug("piSession: starting RPC", "cmd", s.cmd, "args", args)
@@ -388,11 +409,12 @@ func (s *piSession) sendJSON(prompt string) error {
 	if sid := s.CurrentSessionID(); sid != "" {
 		args = append(args, "--session-id", sid)
 	}
-	if s.model != "" {
-		args = append(args, "--model", s.model)
+	model, thinking := s.modelAndThinking()
+	if model != "" {
+		args = append(args, "--model", model)
 	}
-	if s.thinking != "" {
-		args = append(args, "--thinking", s.thinking)
+	if thinking != "" {
+		args = append(args, "--thinking", thinking)
 	}
 
 	slog.Debug("piSession: spawning json mode", "cmd", s.cmd, "sessionID", s.CurrentSessionID())
@@ -490,6 +512,277 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 		return fmt.Errorf("piSession: write stdin: %w", err)
 	}
 	return nil
+}
+
+// ── live model / thinking switching (RPC mode) ──────────────
+//
+// Pi takes --model and --thinking as *spawn* flags, so the engine used to have
+// no way to change either on a running conversation: core.LiveModelSwitcher /
+// core.LiveReasoningEffortSwitcher were unimplemented here, /model fell back to
+// tearing the interactive state down, and /reasoning additionally wiped the
+// session history (pi is not a ReasoningEffortSessionPreserver).
+//
+// Pi's RPC protocol already answers that need: {"type":"set_model",...} and
+// {"type":"set_thinking_level",...} change the running AgentSession in place.
+// The two methods below use them, with a request/response id so a switch is
+// only reported as applied when Pi confirms it.
+
+// rpcSwitchTimeout bounds a live model/thinking switch (or a catalog fetch).
+// It is deliberately shorter than a turn: a switch that Pi cannot apply must
+// fall back to the engine's respawn path quickly rather than hang the command.
+const rpcSwitchTimeout = 10 * time.Second
+
+// rpcReply is the decoded {"type":"response"} frame for a request written by
+// callRPC.
+type rpcReply struct {
+	success bool
+	errMsg  string
+	data    map[string]any
+}
+
+// piModelRef is one entry of Pi's get_available_models catalog. set_model
+// needs the provider as well as the model id, while cc-connect's /model
+// surface (and the `model` config option) use bare ids such as
+// "deepseek-flash", so the catalog is what resolves one to the other.
+type piModelRef struct {
+	id       string
+	name     string
+	provider string
+}
+
+// modelAndThinking reads the spawn-time model and thinking level under cfgMu.
+func (s *piSession) modelAndThinking() (string, string) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.model, s.thinking
+}
+
+// nextRPCRequestID returns a unique id for a request/response pair. The prefix
+// keeps frames greppable in logs and in the fake-RPC tests.
+func (s *piSession) nextRPCRequestID(prefix string) string {
+	s.rpcReplyMu.Lock()
+	defer s.rpcReplyMu.Unlock()
+	s.rpcReqSeq++
+	return fmt.Sprintf("%s-%d", prefix, s.rpcReqSeq)
+}
+
+func (s *piSession) registerRPCReply(id string) chan rpcReply {
+	ch := make(chan rpcReply, 1)
+	s.rpcReplyMu.Lock()
+	if s.rpcReplies == nil {
+		s.rpcReplies = make(map[string]chan rpcReply)
+	}
+	s.rpcReplies[id] = ch
+	s.rpcReplyMu.Unlock()
+	return ch
+}
+
+func (s *piSession) forgetRPCReply(id string) {
+	s.rpcReplyMu.Lock()
+	delete(s.rpcReplies, id)
+	s.rpcReplyMu.Unlock()
+}
+
+// deliverRPCReply hands a response frame to the waiting callRPC and reports
+// whether the id belonged to a pending request, so handleEvent can leave the
+// get_state probe (and any unsolicited response) to its own branch.
+func (s *piSession) deliverRPCReply(id string, reply rpcReply) bool {
+	s.rpcReplyMu.Lock()
+	ch, ok := s.rpcReplies[id]
+	if ok {
+		delete(s.rpcReplies, id)
+	}
+	s.rpcReplyMu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- reply:
+	default:
+	}
+	return true
+}
+
+// callRPC writes cmd with a fresh request id and waits for Pi's matching
+// response frame. Pi answers every command with {"type":"response",...}, so
+// this is how a live switch verifies that Pi actually applied it.
+func (s *piSession) callRPC(ctx context.Context, prefix string, cmd map[string]any, timeout time.Duration) (rpcReply, error) {
+	id := s.nextRPCRequestID(prefix)
+	ch := s.registerRPCReply(id)
+	defer s.forgetRPCReply(id)
+
+	frame := make(map[string]any, len(cmd)+1)
+	for k, v := range cmd {
+		frame[k] = v
+	}
+	frame["id"] = id
+	if err := s.writeRPCCommand(frame); err != nil {
+		return rpcReply{}, err
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case reply := <-ch:
+		return reply, nil
+	case <-timer.C:
+		return rpcReply{}, fmt.Errorf("piSession: %s timed out after %s", prefix, timeout)
+	case <-ctx.Done():
+		return rpcReply{}, ctx.Err()
+	}
+}
+
+// getCatalog returns Pi's available models, fetching and caching them on first
+// use. A failed fetch returns nil so the caller can fall back to the engine's
+// respawn path instead of reporting a switch that never happened.
+func (s *piSession) getCatalog(ctx context.Context) []piModelRef {
+	s.catalogMu.Lock()
+	cached := s.catalog
+	s.catalogMu.Unlock()
+	if cached != nil {
+		return cached
+	}
+	reply, err := s.callRPC(ctx, "cc-connect-available-models", map[string]any{"type": "get_available_models"}, rpcSwitchTimeout)
+	if err != nil || !reply.success {
+		slog.Debug("piSession: get_available_models failed", "error", err, "piError", reply.errMsg)
+		return nil
+	}
+	models := parseModelCatalog(reply.data)
+	if len(models) == 0 {
+		return nil
+	}
+	s.catalogMu.Lock()
+	s.catalog = models
+	s.catalogMu.Unlock()
+	return models
+}
+
+// parseModelCatalog decodes the get_available_models payload: data.models is
+// an array of full Model objects ({id|modelId, name, provider, ...}).
+func parseModelCatalog(data map[string]any) []piModelRef {
+	if data == nil {
+		return nil
+	}
+	raw, _ := data["models"].([]any)
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]piModelRef, 0, len(raw))
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := m["id"].(string)
+		if id == "" {
+			id, _ = m["modelId"].(string)
+		}
+		provider, _ := m["provider"].(string)
+		if id == "" || provider == "" {
+			continue
+		}
+		name, _ := m["name"].(string)
+		out = append(out, piModelRef{id: id, name: name, provider: provider})
+	}
+	return out
+}
+
+// resolveModelRef turns a cc-connect model string into the provider + id pair
+// set_model requires. "provider/id" is used as-is; a bare id is resolved via
+// Pi's catalog, refreshed once if the first lookup misses (so a model added
+// since the session started still resolves).
+func (s *piSession) resolveModelRef(ctx context.Context, model string) (string, string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", "", false
+	}
+	if i := strings.Index(model, "/"); i > 0 && i < len(model)-1 {
+		return model[:i], model[i+1:], true
+	}
+	lookup := func(models []piModelRef) (string, string, bool) {
+		lower := strings.ToLower(model)
+		for _, m := range models {
+			if strings.ToLower(m.id) == lower || (m.name != "" && strings.ToLower(m.name) == lower) {
+				return m.provider, m.id, true
+			}
+		}
+		// Catalog ids are sometimes provider-qualified; match the tail so a
+		// bare id ("deepseek-flash") still resolves.
+		for _, m := range models {
+			if strings.HasSuffix(strings.ToLower(m.id), "/"+lower) {
+				return m.provider, m.id, true
+			}
+		}
+		return "", "", false
+	}
+	if provider, id, ok := lookup(s.getCatalog(ctx)); ok {
+		return provider, id, true
+	}
+	s.catalogMu.Lock()
+	s.catalog = nil
+	s.catalogMu.Unlock()
+	if provider, id, ok := lookup(s.getCatalog(ctx)); ok {
+		return provider, id, true
+	}
+	return "", "", false
+}
+
+// SetLiveModel switches the model of the running RPC conversation
+// (core.LiveModelSwitcher). Returns false when the switch cannot be verified,
+// which lets the engine keep its existing behaviour (respawn the interactive
+// state so the next turn uses the new model).
+func (s *piSession) SetLiveModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" || !s.rpc || s.rpcStdin == nil || !s.Alive() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, rpcSwitchTimeout)
+	defer cancel()
+	provider, modelID, ok := s.resolveModelRef(ctx, model)
+	if !ok {
+		slog.Debug("piSession: live model change: cannot resolve provider", "model", model)
+		return false
+	}
+	reply, err := s.callRPC(ctx, "cc-connect-set-model", map[string]any{
+		"type":     "set_model",
+		"provider": provider,
+		"modelId":  modelID,
+	}, rpcSwitchTimeout)
+	if err != nil || !reply.success {
+		slog.Debug("piSession: live model change failed", "model", model, "provider", provider, "error", err, "piError", reply.errMsg)
+		return false
+	}
+	s.cfgMu.Lock()
+	s.model = model
+	s.cfgMu.Unlock()
+	slog.Info("piSession: live model changed", "model", model, "provider", provider)
+	return true
+}
+
+// SetLiveReasoningEffort applies a thinking-level change to the running RPC
+// conversation (core.LiveReasoningEffortSwitcher) instead of respawning pi.
+// Returns false when Pi rejects it (e.g. a model without reasoning support),
+// so the engine can fall back.
+func (s *piSession) SetLiveReasoningEffort(effort string) bool {
+	effort = strings.TrimSpace(effort)
+	if effort == "" || !s.rpc || s.rpcStdin == nil || !s.Alive() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, rpcSwitchTimeout)
+	defer cancel()
+	reply, err := s.callRPC(ctx, "cc-connect-set-thinking", map[string]any{
+		"type":  "set_thinking_level",
+		"level": effort,
+	}, rpcSwitchTimeout)
+	if err != nil || !reply.success {
+		slog.Debug("piSession: live thinking-level change failed", "level", effort, "error", err, "piError", reply.errMsg)
+		return false
+	}
+	s.cfgMu.Lock()
+	s.thinking = effort
+	s.cfgMu.Unlock()
+	slog.Info("piSession: live thinking level changed", "level", effort)
+	return true
 }
 
 // sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
@@ -592,6 +885,17 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		}
 
 	case "response":
+		// Live-switch replies (set_model / set_thinking_level / catalog) are
+		// routed to the caller that wrote the matching request id. Consume
+		// them here so they cannot be mistaken for the get_state probe below.
+		if id, _ := raw["id"].(string); id != "" {
+			success, _ := raw["success"].(bool)
+			errMsg, _ := raw["error"].(string)
+			data, _ := raw["data"].(map[string]any)
+			if s.deliverRPCReply(id, rpcReply{success: success, errMsg: errMsg, data: data}) {
+				break
+			}
+		}
 		// Startup probe response: matches the get_state request id set by
 		// startRPC. Stores sessionId so readLoopRPC can close rpcReady and
 		// the engine can persist it via the next EventResult.SessionID.
