@@ -34,6 +34,23 @@ type Agent struct {
 	mu           sync.Mutex
 }
 
+// Compile-time capability assertions. The engine type-asserts these optional
+// interfaces to decide whether /model and /reasoning can be applied to a
+// running pi conversation, and whether a per-session model/thinking override is
+// honoured at spawn time. A missing interface degrades silently: the override
+// is dropped at spawn, and a live switch falls back to tearing the interactive
+// state down (or, for reasoning, to wiping the session history).
+var (
+	_ core.Agent                           = (*Agent)(nil)
+	_ core.ModelSwitcher                   = (*Agent)(nil)
+	_ core.ReasoningEffortSwitcher         = (*Agent)(nil)
+	_ core.SessionModelStarter             = (*Agent)(nil)
+	_ core.SessionRuntimeStarter           = (*Agent)(nil)
+	_ core.ReasoningEffortSessionPreserver = (*Agent)(nil)
+	_ core.LiveModelSwitcher               = (*piSession)(nil)
+	_ core.LiveReasoningEffortSwitcher     = (*piSession)(nil)
+)
+
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -134,6 +151,44 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.startSessionWithOverrides(ctx, sessionID, "", "")
+}
+
+// StartSessionWithModel implements core.SessionModelStarter: start or resume a
+// single pi conversation with a model override while leaving the agent-wide
+// default alone. Pi takes --model as a spawn flag, so the override travels
+// with this conversation's process (and with every later respawn of it).
+func (a *Agent) StartSessionWithModel(ctx context.Context, sessionID, modelOverride string) (core.AgentSession, error) {
+	return a.startSessionWithOverrides(ctx, sessionID, modelOverride, "")
+}
+
+// StartSessionWithRuntime implements core.SessionRuntimeStarter (model +
+// thinking level) for per-session overrides and cron runs.
+func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID, modelOverride, reasoningOverride string) (core.AgentSession, error) {
+	if err := a.ValidateSessionRuntime(modelOverride, reasoningOverride); err != nil {
+		return nil, err
+	}
+	return a.startSessionWithOverrides(ctx, sessionID, modelOverride, reasoningOverride)
+}
+
+// ValidateSessionRuntime rejects an unknown thinking level before a session
+// starts, so a scheduled run fails loudly instead of silently dropping the
+// override. The model id is not validated here: pi resolves model patterns at
+// spawn time and reports an unknown one itself.
+func (a *Agent) ValidateSessionRuntime(_, reasoningOverride string) error {
+	reasoningOverride = strings.TrimSpace(reasoningOverride)
+	if reasoningOverride == "" {
+		return nil
+	}
+	for _, level := range a.AvailableReasoningEfforts() {
+		if strings.EqualFold(level, reasoningOverride) {
+			return nil
+		}
+	}
+	return fmt.Errorf("pi: invalid thinking level %q", reasoningOverride)
+}
+
+func (a *Agent) startSessionWithOverrides(ctx context.Context, sessionID, modelOverride, reasoningOverride string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
@@ -143,6 +198,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	rpc := a.rpc
 	a.mu.Unlock()
+	if override := strings.TrimSpace(modelOverride); override != "" {
+		model = override
+	}
+	if override := strings.TrimSpace(reasoningOverride); override != "" {
+		thinking = override
+	}
 	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, rpc, sessionID, extraEnv)
 }
 
@@ -270,6 +331,15 @@ func (a *Agent) GetReasoningEffort() string {
 func (a *Agent) AvailableReasoningEfforts() []string {
 	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
 }
+
+// PreservesSessionOnReasoningEffortChange reports that a pi conversation never
+// needs its history wiped for a thinking-level change: RPC sessions apply it
+// in place (piSession.SetLiveReasoningEffort) and one-shot json sessions resume
+// the same pi session id with a new --thinking flag, so the persisted
+// conversation stays valid either way. Without this, /reasoning on a pi
+// session fell into core.resetSessionForReasoningChange and cleared the
+// history.
+func (a *Agent) PreservesSessionOnReasoningEffortChange() bool { return true }
 
 // ── WorkDirSwitcher ───────────────────────────────────────────
 
