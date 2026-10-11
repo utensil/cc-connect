@@ -247,7 +247,11 @@ func parseContextUsageFromRolloutBytes(data []byte) *core.ContextUsage {
 
 func scanContextUsageFromRollout(r io.Reader) (*core.ContextUsage, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	// Rollout records can exceed the previous 2 MiB bound: a token_count record of 2.09 MiB was read
+	// from a live thread on 2026-10-11, and an aborted scan reported no context usage at all for
+	// exactly the large threads that also need a large app-server per-line bound. Use the shared
+	// agent-record bound so no reader in this package silently disagrees.
+	scanner.Buffer(make([]byte, 0, 64*1024), core.AgentStreamMaxLineBytes)
 
 	var last *core.ContextUsage
 	for scanner.Scan() {

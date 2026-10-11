@@ -1223,8 +1223,9 @@ func (s *appServerSession) readLoop(r io.Reader) {
 func (s *appServerSession) stderrLoop(r io.Reader) {
 	defer s.wg.Done()
 	scanner := bufio.NewScanner(r)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	// Keep stderr on the same bound as stdout: an over-sized stderr record is only logged at debug
+	// level here and must never be the reason a session is treated as dead.
+	scanner.Buffer(make([]byte, 0, 64*1024), core.AgentStreamMaxLineBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
