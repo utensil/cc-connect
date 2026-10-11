@@ -212,7 +212,10 @@ fresher, like it had answered about the wrong project.
 - Related upstream issue: [chenhg5/cc-connect#189](https://github.com/chenhg5/cc-connect/issues/189)
   (single stdout line over the scanner limit aborts a session). The same 10 MiB bound and the silent
   fallback exist in the canonical repository, so this is a candidate upstream PR.
-- Merge record: (this change's PR) — see the pull request that landed this entry.
+- Branch commit: [d080848b](https://github.com/utensil/cc-connect/commit/d080848b) on
+  `fix/codex-resume-line-cap`.
+- Merge record: [PR #17](https://github.com/utensil/cc-connect/pull/17) — open, merge is
+  human-gated.
 
 ### Unicode-aware command parsing
 
