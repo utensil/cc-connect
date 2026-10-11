@@ -193,6 +193,9 @@ type appServerSession struct {
 
 	threadID atomic.Value
 	alive    atomic.Bool
+	// longLineWarned reports (once) that a stdout record is approaching
+	// core.AgentStreamMaxLineBytes. See core.WarnOnLongAgentStreamLine.
+	longLineWarned atomic.Bool
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -1150,10 +1153,7 @@ func (s *appServerSession) Close() error {
 
 func (s *appServerSession) readLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanBuf := make([]byte, 0, 64*1024)
-	const maxLineSize = 10 * 1024 * 1024 // 10MB
-	scanner.Buffer(scanBuf, maxLineSize)
+	scanner := core.NewAgentStreamScanner(r)
 
 	for scanner.Scan() {
 		select {
@@ -1163,6 +1163,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		}
 
 		data := scanner.Bytes()
+		core.WarnOnLongAgentStreamLine("codex app-server stdout", len(data), &s.longLineWarned)
 
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(data, &probe); err != nil {
@@ -1203,7 +1204,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
 			slog.Warn("codex app-server read failed", "error", err)
 			if errors.Is(err, bufio.ErrTooLong) {
-				s.emitError(fmt.Errorf("codex app-server line exceeds max size (%d bytes): %w", maxLineSize, err))
+				s.emitError(fmt.Errorf("codex app-server line exceeds max size (%d bytes): %w", core.AgentStreamMaxLineBytes, err))
 			} else {
 				s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
 			}

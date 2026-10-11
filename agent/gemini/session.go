@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -231,8 +230,7 @@ func (gs *geminiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.
 		stdout.Close()
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	scanner := core.NewAgentStreamScanner(stdout)
 
 	for scanner.Scan() {
 		line := scanner.Text()

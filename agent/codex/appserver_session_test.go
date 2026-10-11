@@ -247,6 +247,49 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_ReadLoopAcceptsRecordLargerThanTheLegacyCap(t *testing.T) {
+	// Regression: the read loop capped a single stdout record at 10 MB, and
+	// resuming a long thread emits records larger than that. The loop aborted
+	// with bufio.ErrTooLong (surfaced as "bufio.Scanner: token too long"), the
+	// session died, and the engine replaced the saved conversation with an empty
+	// one. A record past the old bound must now be delivered intact.
+	stdin := &callbackWriteCloser{}
+	s := newScriptedAppServerSession(t, stdin)
+	defer s.cancel()
+
+	payload := strings.Repeat("x", 11<<20) // past the old 10 MB cap, within the current bound
+	record := fmt.Sprintf(`{"id":1,"result":{"oversized":%q}}`, payload)
+
+	reply := make(chan rpcResponseEnvelope, 1)
+	s.pendingMu.Lock()
+	s.pending[1] = reply
+	s.pendingMu.Unlock()
+
+	s.wg.Add(1)
+	go s.readLoop(strings.NewReader(record + "\n"))
+	s.wg.Wait()
+
+	select {
+	case resp := <-reply:
+		if got, _ := rpcIDToInt64(resp.ID); got != 1 {
+			t.Fatalf("response id = %#v, want 1", resp.ID)
+		}
+		if len(resp.Result) < 11<<20 {
+			t.Fatalf("response result = %d bytes, want the oversized record delivered intact", len(resp.Result))
+		}
+	default:
+		t.Fatal("oversized record was dropped: the read loop aborted instead of delivering it")
+	}
+
+	select {
+	case ev := <-s.events:
+		if ev.Type == core.EventError {
+			t.Fatalf("unexpected error event for a record within the bound: %v", ev.Error)
+		}
+	default:
+	}
+}
+
 func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

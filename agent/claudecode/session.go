@@ -1,7 +1,6 @@
 package claudecode
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -468,8 +467,7 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 	waitErrCh, waitDone := cs.startReadLoopWait(stdout)
 	defer cs.finishReadLoop(waitErrCh, stderrBuf)
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	scanner := core.NewAgentStreamScanner(stdout)
 	for scanner.Scan() {
 		cs.handleReadLoopLine(scanner.Text())
 	}

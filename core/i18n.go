@@ -331,6 +331,12 @@ const (
 	MsgSteerNotSupported    MsgKey = "steer_not_supported"
 	MsgSessionRecovered     MsgKey = "session_recovered"
 
+	// Emitted when a saved conversation could not be resumed and the engine fell
+	// back to a fresh one: without it the replacement is invisible and the agent
+	// answers without the earlier context. See Engine.getOrCreateInteractiveStateWith.
+	MsgResumeFailedFreshStarted         MsgKey = "resume_failed_fresh_started"
+	MsgResumeFailedTooLargeFreshStarted MsgKey = "resume_failed_too_large_fresh_started"
+
 	MsgMemoryNotSupported MsgKey = "memory_not_supported"
 	MsgMemoryShowProject  MsgKey = "memory_show_project"
 	MsgMemoryShowGlobal   MsgKey = "memory_show_global"
@@ -2539,6 +2545,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ Agent 工作階段已失效並被替換，先前的對話上下文可能不完整。",
 		LangJapanese:           "⚠️ エージェントセッションが使用不能になったため置き換えました。以前の会話コンテキストが不完全な可能性があります。",
 		LangSpanish:            "⚠️ La sesión del agente dejó de ser utilizable y fue reemplazada. El contexto anterior puede estar incompleto.",
+	},
+	MsgResumeFailedFreshStarted: {
+		LangEnglish:            "⚠️ Couldn't resume the previous session, so a new one was started — the earlier context isn't available here. (previous session: %s)",
+		LangChinese:            "⚠️ 无法恢复上一个会话，已开始新会话 —— 此会话没有之前的上下文。（之前的会话：%s）",
+		LangTraditionalChinese: "⚠️ 無法恢復上一個工作階段，已開始新的工作階段 —— 此工作階段沒有先前的上下文。（先前的工作階段：%s）",
+		LangJapanese:           "⚠️ 前回のセッションを再開できなかったため、新しいセッションを開始しました。以前のコンテキストは引き継がれていません。（前回のセッション: %s）",
+		LangSpanish:            "⚠️ No se pudo reanudar la sesión anterior, así que se inició una nueva: el contexto anterior no está disponible aquí. (sesión anterior: %s)",
+	},
+	MsgResumeFailedTooLargeFreshStarted: {
+		LangEnglish:            "⚠️ The previous session was too large to resume, so a new one was started — the earlier context isn't available here. (previous session: %s)",
+		LangChinese:            "⚠️ 上一个会话过大，无法恢复，已开始新会话 —— 此会话没有之前的上下文。（之前的会话：%s）",
+		LangTraditionalChinese: "⚠️ 上一個工作階段過大，無法恢復，已開始新的工作階段 —— 此工作階段沒有先前的上下文。（先前的工作階段：%s）",
+		LangJapanese:           "⚠️ 前回のセッションが大きすぎて再開できなかったため、新しいセッションを開始しました。以前のコンテキストは引き継がれていません。（前回のセッション: %s）",
+		LangSpanish:            "⚠️ La sesión anterior era demasiado grande para reanudarla, así que se inició una nueva: el contexto anterior no está disponible aquí. (sesión anterior: %s)",
 	},
 
 	// Inline strings for engine.go commands

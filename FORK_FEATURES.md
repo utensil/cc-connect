@@ -186,6 +186,34 @@ session id with a new `--thinking` flag.
   `get_available_models`, but no cc-connect agent used them; upstream's live
   model switching is Codex-only (`core.LiveModelSwitcher`).
 
+### Agent stdout line bound and visible resume fallback
+
+Agent stdout records are read with a shared bound (`core.AgentStreamMaxLineBytes`, 64 MiB) applied
+by `core.NewAgentStreamScanner`, replacing the previous per-adapter 10 MiB buffers. Resuming a long
+Codex thread emits records larger than the old bound: the read loop aborted with
+`bufio.Scanner: token too long`, the session died, and the engine replaced the saved conversation
+with an empty one. A record approaching the bound is logged once per stream so conversation growth
+is visible before it becomes a failure.
+
+When a saved conversation still cannot be resumed, the fallback is no longer silent. The engine
+posts an i18n notice naming the abandoned session (`core.MsgResumeFailedFreshStarted`, and
+`core.MsgResumeFailedTooLargeFreshStarted` when the cause is an oversized record), and the replaced
+id stays recoverable through `Session.PastAgentSessionIDs` / `GetPastAgentSessionIDs`. Before this,
+the swap appeared only as a WARN line in the log, so an agent answering without context looked like
+it had forgotten the subject — or, in a shared workspace where another project's artifacts were
+fresher, like it had answered about the wrong project.
+
+- Files: `core/agent_stream.go`, `core/engine.go`, `core/i18n.go`, `core/session.go`,
+  `agent/codex/appserver_session.go`, `agent/gemini/session.go`, `agent/cursor/session.go`,
+  `agent/claudecode/session.go`.
+- Tests: `TestAppServerSession_ReadLoopAcceptsRecordLargerThanTheLegacyCap` (fails with the old
+  10 MiB bound, passes with the shared one),
+  `TestResumeFailureFallbackNotifiesUserAndKeepsFailedSessionID`.
+- Related upstream issue: [chenhg5/cc-connect#189](https://github.com/chenhg5/cc-connect/issues/189)
+  (single stdout line over the scanner limit aborts a session). The same 10 MiB bound and the silent
+  fallback exist in the canonical repository, so this is a candidate upstream PR.
+- Merge record: (this change's PR) — see the pull request that landed this entry.
+
 ### Unicode-aware command parsing
 
 Commands split arguments on Unicode whitespace, so pasted Discord text and
@@ -367,6 +395,15 @@ tool call follows in the same turn. Reproduced in an isolated worktree at that
 base ref before the Pi live-switching change, so it is a stale test, not a
 regression from it. Do not use the full `agent/pi` package run as a green gate
 until the test is either updated or retired.
+
+Also reproduced at base ref `1abb24e8` (each passing in the fixed tree):
+`agent/pi TestPiSession_CancelTurn_JSONStopsActiveProcess` and
+`config TestValidateProjectDisplayConfig`. In the broad parallel run
+`go test -tags no_web ./...`, `agent/codex
+TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset` can also fail while it
+passes in isolation at both refs — it drives a scripted subprocess, so it is
+load-sensitive. Treat a broad-suite failure as inconclusive until the test has
+been re-run in isolation at the same ref.
 
 ### `[projects.display]` applied at engine startup
 
