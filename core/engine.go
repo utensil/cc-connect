@@ -4334,11 +4334,15 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
 		if startSessionID != "" {
+			failedSessionID := startSessionID
+			resumeErr := err
 			slog.Error("session resume failed, falling back to fresh session",
-				"session_key", sessionKey, "failed_session_id", startSessionID,
-				"error", err, "elapsed", startElapsed)
+				"session_key", sessionKey, "failed_session_id", failedSessionID,
+				"error", resumeErr, "elapsed", startElapsed)
 			// Clear the stale session ID so CompareAndSetAgentSessionID can
 			// write the new ID, matching the relay fallback at line 12640.
+			// SetAgentSessionID records the replaced ID in PastAgentSessionIDs,
+			// so the abandoned conversation stays recoverable.
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
@@ -4346,7 +4350,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
-					"session_key", sessionKey, "elapsed", startElapsed)
+					"session_key", sessionKey, "elapsed", startElapsed,
+					"failed_session_id", failedSessionID)
+				// The replacement used to be silent: the user's conversation was
+				// swapped for an empty one and the agent went on to answer from
+				// whatever else it could find, which looks like the bot forgot the
+				// subject or answered about something unrelated. Say what happened
+				// and name the abandoned session so it can be recovered.
+				e.send(p, replyCtx, e.i18n.Tf(freshStartNoticeKey(resumeErr), failedSessionID))
 			}
 		}
 		if err != nil {
@@ -4418,6 +4429,27 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	})
 
 	return state
+}
+
+// freshStartNoticeKey picks the user-facing notice for a resume failure that
+// fell back to a fresh session. A stream record that exceeded the per-line bound
+// (core.AgentStreamMaxLineBytes) means the saved conversation was too large to
+// load; unlike a transient failure it will recur on every attempt until the
+// conversation is rotated or the bound is raised, so it gets its own wording.
+func freshStartNoticeKey(err error) MsgKey {
+	if err == nil {
+		return MsgResumeFailedFreshStarted
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		return MsgResumeFailedTooLargeFreshStarted
+	}
+	low := strings.ToLower(err.Error())
+	for _, marker := range []string{"token too long", "exceeds max size"} {
+		if strings.Contains(low, marker) {
+			return MsgResumeFailedTooLargeFreshStarted
+		}
+	}
+	return MsgResumeFailedFreshStarted
 }
 
 func startAgentSessionWithRuntimeOverrides(ctx context.Context, agent Agent, sessionID, modelOverride, reasoningOverride string) (AgentSession, error) {

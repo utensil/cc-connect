@@ -8870,6 +8870,92 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	}
 }
 
+func TestResumeFailureFallbackNotifiesUserAndKeepsFailedSessionID(t *testing.T) {
+	// Regression: the fresh-session fallback used to be silent. The user's
+	// conversation was replaced by an empty one and the agent answered without
+	// its earlier context, which reads as the bot having forgotten the subject
+	// (or answering about something unrelated). The notice must name the
+	// abandoned session, and that session id must stay recoverable.
+	agent := &stubStartSessionAgent{
+		failIDs: map[string]error{
+			// The observed production error for a saved conversation whose
+			// stream record exceeded the per-line bound.
+			"oversized-session-id": fmt.Errorf("bufio.Scanner: token too long"),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := &Engine{
+		agent:             agent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+
+	session := e.sessions.GetOrCreateActive("test:resume-notice")
+	session.SetAgentSessionID("oversized-session-id", "stub")
+
+	p := &stubPlatformEngine{n: "test"}
+	state := e.getOrCreateInteractiveStateWith("test:resume-notice", p, "ctx", session, e.sessions, nil, "")
+
+	if state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil after fallback")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("expected exactly one user notice after the fallback, got %d: %v", len(sent), sent)
+	}
+	if !strings.Contains(sent[0], "oversized-session-id") {
+		t.Errorf("notice %q does not name the abandoned session", sent[0])
+	}
+	if !strings.Contains(sent[0], "too large") {
+		t.Errorf("notice %q should use the oversized-session wording", sent[0])
+	}
+
+	found := false
+	for _, id := range session.GetPastAgentSessionIDs() {
+		if id == "oversized-session-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("failed session id was not preserved for recovery: %v", session.GetPastAgentSessionIDs())
+	}
+
+	// A resume failure that is not about size still notifies, with the generic
+	// wording.
+	genericAgent := &stubStartSessionAgent{failIDs: map[string]error{"other-session-id": fmt.Errorf("thread not found")}}
+	e2 := &Engine{
+		agent:             genericAgent,
+		sessions:          NewSessionManager(""),
+		ctx:               ctx,
+		i18n:              NewI18n("en"),
+		interactiveStates: make(map[string]*interactiveState),
+		display:           DisplayCfg{},
+	}
+	session2 := e2.sessions.GetOrCreateActive("test:resume-notice-generic")
+	session2.SetAgentSessionID("other-session-id", "stub")
+	p2 := &stubPlatformEngine{n: "test"}
+	if state := e2.getOrCreateInteractiveStateWith("test:resume-notice-generic", p2, "ctx", session2, e2.sessions, nil, ""); state.agentSession == nil {
+		t.Fatal("expected agentSession to be non-nil after generic fallback")
+	}
+	sent2 := p2.getSent()
+	if len(sent2) != 1 {
+		t.Fatalf("expected one generic notice, got %d: %v", len(sent2), sent2)
+	}
+	if strings.Contains(sent2[0], "too large") {
+		t.Errorf("generic failure used the oversized-session wording: %q", sent2[0])
+	}
+	if !strings.Contains(sent2[0], "other-session-id") {
+		t.Errorf("generic notice %q does not name the abandoned session", sent2[0])
+	}
+}
+
 func TestFreshSessionWithoutSavedSessionIDStartsFresh(t *testing.T) {
 	agent := &stubStartSessionAgent{}
 

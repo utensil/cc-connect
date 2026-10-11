@@ -130,6 +130,15 @@ func (s *Session) GetAgentSessionID() string {
 	return s.AgentSessionID
 }
 
+// GetPastAgentSessionIDs returns the agent session IDs this row used before, in
+// order. Replaced or cleared IDs land here (see SetAgentSessionID), which is what
+// keeps an abandoned conversation recoverable after a failed resume.
+func (s *Session) GetPastAgentSessionIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.PastAgentSessionIDs...)
+}
+
 // SetName atomically updates the session's display name. The management
 // API used to write s.Name directly, which raced with GetName / listing
 // handlers that read it under s.mu.
