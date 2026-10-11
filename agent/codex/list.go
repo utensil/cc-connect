@@ -92,7 +92,9 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	userMsgSeen := 0
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	// One oversized record used to abort the scan before session_meta, which made the session
+	// disappear from the listing; use the shared agent-record bound instead of a 256 KiB cap.
+	scanner.Buffer(make([]byte, 0, 64*1024), core.AgentStreamMaxLineBytes)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -200,7 +202,8 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 	var entries []core.HistoryEntry
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	// Same bound as the rest of the package: a large record must not truncate the history.
+	scanner.Buffer(make([]byte, 0, 64*1024), core.AgentStreamMaxLineBytes)
 
 	for scanner.Scan() {
 		line := scanner.Text()

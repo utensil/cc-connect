@@ -204,14 +204,21 @@ it had forgotten the subject — or, in a shared workspace where another project
 fresher, like it had answered about the wrong project.
 
 - Files: `core/agent_stream.go`, `core/engine.go`, `core/i18n.go`, `core/session.go`,
-  `agent/codex/appserver_session.go`, `agent/gemini/session.go`, `agent/cursor/session.go`,
-  `agent/claudecode/session.go`.
+  `agent/codex/appserver_session.go`, `agent/codex/context_usage.go`, `agent/codex/list.go`,
+  `agent/gemini/session.go`, `agent/cursor/session.go`, `agent/claudecode/session.go`.
 - Tests: `TestAppServerSession_ReadLoopAcceptsRecordLargerThanTheLegacyCap` (fails with the old
   10 MiB bound, passes with the shared one),
-  `TestResumeFailureFallbackNotifiesUserAndKeepsFailedSessionID`.
+  `TestResumeFailureFallbackNotifiesUserAndKeepsFailedSessionID`,
+  `TestScanContextUsageFromRollout_AcceptsRecordLargerThanLegacyCap` and
+  `TestParseCodexSessionFile_AcceptsRecordLargerThanLegacyCap` (both fail with the previous codex
+  caps: `bufio.Scanner: token too long`, and a session that vanishes from the listing).
 - Related upstream issue: [chenhg5/cc-connect#189](https://github.com/chenhg5/cc-connect/issues/189)
   (single stdout line over the scanner limit aborts a session). The same 10 MiB bound and the silent
   fallback exist in the canonical repository, so this is a candidate upstream PR.
+- Every line reader in the Codex package shares the bound, including the transcript readers on disk:
+  a rollout record measured 2.09 MiB in the 2026-10-11 resume failure on the Zulip instance, so the
+  previous 2 MiB context-usage cap and 256 KiB session-listing cap failed on exactly the threads this
+  change is about.
 - Branch commit: [d080848b](https://github.com/utensil/cc-connect/commit/d080848b) on
   `fix/codex-resume-line-cap`.
 - Merge record: [PR #17](https://github.com/utensil/cc-connect/pull/17) — open, merge is
