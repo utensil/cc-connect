@@ -8694,10 +8694,11 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 }
 
 // allowedAgentTypes lists the agent types a session may switch to via /agent.
-// Extends upstream's codex|claudecode allowlist with pi (fork feature); the
-// set is the registered agent types that make sense to multiplex on one bot.
+// Extends upstream's codex|claudecode allowlist with pi and grok (fork
+// features); the set is the registered agent types that make sense to multiplex
+// on one bot.
 func allowedAgentTypes() []string {
-	return []string{"codex", "claudecode", "pi"}
+	return []string{"codex", "claudecode", "pi", "grok"}
 }
 
 func isAllowedAgentType(target string) bool {
@@ -8710,7 +8711,7 @@ func isAllowedAgentType(target string) bool {
 }
 
 // cmdAgent views or switches the current session's agent type and optional
-// work dir. Usage: /agent [codex|claude|claudecode|pi|reset] [absolute-path]
+// work dir. Usage: /agent [codex|claude|claudecode|pi|grok|reset] [absolute-path]
 func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 	baseAgent, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
@@ -8745,7 +8746,7 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 	switch target {
 	case "reset":
 		target = ""
-	case "codex", "claudecode", "pi":
+	case "codex", "claudecode", "pi", "grok":
 	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentInvalid, args[0]))
 		return

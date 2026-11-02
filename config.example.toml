@@ -1887,6 +1887,60 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Grok Build CLI (xAI, https://x.ai/cli) / 使用 Grok Build CLI
+# =============================================================================
+# The fork ships a first-class `type = "grok"` agent that drives Grok Build in
+# headless mode: one `grok -p ... --output-format streaming-json` process per
+# turn, `--resume <sessionId>` for continuity, plus `-m/--model` and
+# `--reasoning-effort`. An existing codex/pi project can also reach it per
+# session with `/agent grok [absolute-path] [model] [reasoning]`.
+# 本分支内置 `type = "grok"` agent，以 headless 模式驱动 Grok Build：每回合一个
+# `grok -p ... --output-format streaming-json` 进程，用 `--resume` 续接会话，
+# 并支持 `-m/--model` 与 `--reasoning-effort`。已有的 codex/pi 项目也可以按会话
+# 使用 `/agent grok [绝对路径] [模型] [推理]` 切换过去。
+#
+# Prerequisites / 前置条件:
+#   1. curl -fsSL https://x.ai/cli/install.sh | bash
+#      (installs to ~/.grok/bin/grok — NOT on launchd's PATH, so set `cmd` to
+#      the absolute path below when cc-connect runs as a LaunchAgent)
+#   2. Authenticate once / 先登录一次:
+#        grok login              # browser (loopback) flow
+#        grok login --device-code # headless / remote machine
+#      or export XAI_API_KEY (and optionally XAI_API_BASE_URL) via `env` below.
+#   3. `grok models` should list the account's models / 确认能列出模型
+#
+# Options / 选项:
+# - cmd = path or name of the grok binary (default: "grok")
+# - mode = "default"|"accept_edits"|"yolo"|"plan"|"dont_ask"
+#   Headless turns cannot answer permission prompts, so every mode except
+#   `plan` runs with --always-approve. / 除 plan 外的模式都会自动批准。
+# - model = model id from `grok models` (e.g. "grok-4.6"); empty → CLI default
+# - reasoning_effort = xhigh|high|medium|low (model dependent)
+# - max_turns = optional agent turn ceiling per prompt
+# - timeout_mins = optional per-turn timeout
+
+# [[projects]]
+# name = "my-grok-project"
+#
+# [projects.agent]
+# type = "grok"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# cmd = "/Users/you/.grok/bin/grok"
+# mode = "yolo"
+# model = "grok-4.6"
+# reasoning_effort = "high"
+# # max_turns = 40
+# # timeout_mins = 30
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
 # =============================================================================
 # Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
