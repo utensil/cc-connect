@@ -12,6 +12,7 @@ const AGENT_OPTIONS = [
   { key: 'claudecode', label: 'Claude Code' },
   { key: 'codex', label: 'Codex' },
   { key: 'gemini', label: 'Gemini CLI' },
+  { key: 'grok', label: 'Grok Build' },
   { key: 'antigravity', label: 'Antigravity CLI' },
   { key: 'cursor', label: 'Cursor' },
   { key: 'devin', label: 'Devin' },

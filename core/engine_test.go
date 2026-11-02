@@ -17256,6 +17256,54 @@ func TestCmdAgent_RejectsUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestCmdAgent_SwitchesToGrok(t *testing.T) {
+	// grok must be reachable through /agent: the allowlist and the cmdAgent
+	// switch both have to accept it, and per-backend options must be the ones
+	// handed to the switchable agent.
+	var gotType string
+	var gotOpts map[string]any
+	RegisterAgent("grok", func(opts map[string]any) (Agent, error) {
+		gotType = "grok"
+		gotOpts = opts
+		return &stubModelModeAgent{model: "grok-4.6"}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)
+	// codex is the project default; grok gets its own per-backend options under
+	// [projects.agent.options.agents.grok].
+	e.SetDefaultAgentConfig("codex", map[string]any{
+		"work_dir": "/tmp",
+		"agents": map[string]any{
+			"grok": map[string]any{
+				"work_dir": "/tmp",
+				"model":    "grok-4.6",
+				"cmd":      "/Users/example/.grok/bin/grok",
+			},
+		},
+	}, nil, "")
+
+	e.cmdAgent(p, &Message{SessionKey: "test:grok", ReplyCtx: "ctx"}, []string{"grok", "grok-4.5"})
+
+	s := e.sessions.GetOrCreateActive("test:grok")
+	if got := s.GetAgentOverride(); got != "grok" {
+		t.Fatalf("agent override = %q, want grok", got)
+	}
+	if got := s.GetModelOverride(); got != "grok-4.5" {
+		t.Fatalf("model override = %q, want grok-4.5", got)
+	}
+	if gotType != "grok" {
+		t.Fatalf("built agent type = %q, want grok", gotType)
+	}
+	if gotOpts["cmd"] != "/Users/example/.grok/bin/grok" {
+		t.Fatalf("grok options not applied, got %v", gotOpts)
+	}
+	// codex-only keys must not leak into the grok agent options.
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "grok-4.5") {
+		t.Fatalf("reply = %q, want it to mention the model", p.sent)
+	}
+}
+
 func TestCmdPath_SetsSessionWorkDir(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubModelModeAgent{}, []Platform{p}, "", LangEnglish)

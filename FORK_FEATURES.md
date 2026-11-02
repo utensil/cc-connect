@@ -315,7 +315,7 @@ the upstream link before removing any fork delta.
 
 ### Session-scoped /agent and /path switching
 
-`/agent <codex|claude|claudecode|pi|reset> [absolute-path]` switches the
+`/agent <codex|claude|claudecode|pi|grok|reset> [absolute-path]` switches the
 current session's agent type; `/path <absolute-path|reset>` switches the
 current session's work dir. Both are per-session overrides persisted on the
 `Session` row (`agent_override`, `work_dir_override`) and are restored by
@@ -348,10 +348,67 @@ next turn starts fresh on the new agent.
   ("Multi-Agent Switching Within the Same Project").
 - Fork PR: (this feature's PR) — see the pull request that landed this entry.
 
+### Native Grok Build (`grok`) agent
+
+One Discord bot can run xAI's Grok Build CLI (`https://x.ai/cli`) as a first-class
+agent: `type = "grok"`, plus `/agent grok [path] [model] [reasoning]` for
+session-scoped switching on a codex or pi project.
+
+- Adapter: `agent/grok` drives headless mode
+  (`grok -p|--prompt-file <prompt> --output-format streaming-json`), one process
+  per turn, with `--resume <sessionId>` (taken from the terminal `end` frame) for
+  conversation continuity, `-m/--model`, `--reasoning-effort`, `--max-turns`,
+  `--cwd`, and `--permission-mode` (+ `--always-approve` for every mode except
+  `plan`, because headless turns have no TUI to click "allow").
+- Event mapping follows the streaming-json schema published with the CLI
+  (`thought`, `text`, `tool_call`, `tool_call_update`, `usage`, `plan`,
+  `available_commands`, `end`, `error`). Token deltas are coalesced into single
+  `EventThinking`/`EventText` payloads so a reply is not one IM bubble per token;
+  `tool_call_update` is only surfaced for terminal `completed`/`failed` statuses
+  and its `toolCallId` is resolved back to the tool name from its `tool_call`.
+- Model catalog: `AvailableModels`/`AvailableReasoningEfforts` read the ACP
+  `initialize` result of `grok agent stdio` (`_meta.modelState`), which reports
+  ids, display names, context windows and the per-model reasoning efforts and
+  needs **no login**. `grok models` is the fallback and a static list the last
+  resort; the probe is cached for 10 minutes.
+- Live switching: the session implements `LiveModelSwitcher` and
+  `LiveReasoningEffortSwitcher`, so `/model` and `/reasoning` change the next
+  turn of the same conversation without clearing history (each turn is a new
+  headless process, so nothing has to be replaced). The agent implements
+  `SessionModelStarter`/`SessionRuntimeStarter` so a persisted override is
+  applied at spawn, and `ReasoningEffortSessionPreserver`.
+- Also implemented: `ModeSwitcher` (`/mode`: `default`, `accept_edits`, `yolo`,
+  `plan`, `dont_ask`), `ProviderSwitcher` (`XAI_API_KEY`/`XAI_API_BASE_URL` from
+  `[projects.agent.options.providers]`), `WorkDirSwitcher`, `SkillProvider`
+  (`<work_dir>/.grok/skills`, `~/.grok/skills`), `MemoryFileProvider`
+  (`AGENTS.md`), session listing/deletion under `~/.grok/sessions`.
+- Fork delta on top of the ported adapter: `/agent` allowlist accepts `grok`
+  (`allowedAgentTypes` + the `cmdAgent` switch), per-backend options work through
+  the existing `[projects.agent.options.agents.grok]` block, the catalog probe,
+  the documented-schema event mapping, and the live model/reasoning switches.
+- Provenance: ported from the *unmerged* upstream PR
+  [chenhg5/cc-connect#1558](https://github.com/chenhg5/cc-connect/pull/1558)
+  (liyang480, `agent/grok` headless `-p` adapter). Upstream also carries the much
+  larger unmerged
+  [chenhg5/cc-connect#1635](https://github.com/chenhg5/cc-connect/pull/1635)
+  (hzy9738, native-slash surface) and issue
+  [chenhg5/cc-connect#1914](https://github.com/chenhg5/cc-connect/issues/1914);
+  neither is merged as of 2026-11-01, and `chenhg5/cc-connect` has **no** grok
+  agent on `main`. There is therefore no upstream commit to sync for this
+  feature; the adapter was adapted to this fork's older `core` contract.
+- Upstream policy note: [chenhg5/cc-connect#1244](https://github.com/chenhg5/cc-connect/issues/1244)
+  asks new integrations to go through ACP first. This adapter deliberately drives
+  the native headless CLI instead, because the generic `acp` agent has no
+  `ModelSwitcher`/`SessionModelStarter` support, so `/model` (the operator's
+  requirement) would not work through it.
+- Known limits: session listing assumes Grok's `~/.grok/sessions/<escaped-cwd>/<sessionId>`
+  layout; attachments are written to `<work_dir>/.cc-connect/attachments` and
+  referenced by path in the prompt rather than sent as native image blocks.
+
 ### Combined `/agent <type> [path] [model] [reasoning]`
 
 `/agent` accepts optional trailing `[model] [reasoning]` args so agent, model,
-and reasoning switch in one command: `/agent <codex|claudecode|pi> [path]
+and reasoning switch in one command: `/agent <codex|claudecode|pi|grok> [path]
 [model] [reasoning]`. Arg[1] is treated as an absolute path when it starts
 with `/` or `~`; otherwise it is a model name (bare form), so both
 `/agent pi /path model reasoning` and `/agent pi model reasoning` work.
