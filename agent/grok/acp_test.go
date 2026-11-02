@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -567,4 +569,138 @@ func TestACPSession_SendRejectsClosedSession(t *testing.T) {
 	err := s.Send("hello", nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "closed"))
+}
+
+func TestACPSession_SteerInjectionErrorFallsBackToCancel(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", nativeSteer: true})
+
+	require.NoError(t, s.Send("do the long thing", nil, nil))
+	primary := f.expect("session/prompt")
+	f.text("working")
+
+	steerDone := make(chan error, 1)
+	go func() { steerDone <- s.Steer("change of plan") }()
+	steer := f.expect("session/prompt")
+	f.errorResp(steer.ID, -32600, "cannot inject")
+
+	// The adapter must not surface a turn error; it cancels and continues.
+	require.Eventually(t, func() bool { return f.sawMethod("session/cancel") }, 2*time.Second, 10*time.Millisecond)
+	f.promptResult(primary.ID, "cancelled", 0, 0)
+
+	replacement := f.expect("session/prompt")
+	blocks, ok := replacement.Params["prompt"].([]any)
+	require.True(t, ok)
+	block, ok := blocks[0].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, block["text"], "change of plan")
+
+	f.text("did the new plan")
+	f.promptResult(replacement.ID, "end_turn", 50, 5)
+
+	require.NoError(t, <-steerDone)
+	events := drainSessionEvents(t, s)
+	for _, evt := range events {
+		if evt.Type == core.EventError {
+			t.Fatalf("steer injection failure must not surface as a turn error: %v", evt.Error)
+		}
+	}
+	assert.True(t, strings.Contains(collectText(events), "did the new plan"))
+	assert.Equal(t, 1, countResults(events))
+}
+
+func TestACPSession_TurnTimeoutDoesNotCancelLaterTurns(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", timeout: 120 * time.Millisecond})
+
+	require.NoError(t, s.Send("quick question", nil, nil))
+	req := f.expect("session/prompt")
+	f.promptResult(req.ID, "end_turn", 10, 2)
+	drainSessionEvents(t, s)
+
+	// The turn already settled; its timeout timer must not fire into the next
+	// turn (which would cancel an unrelated request).
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, f.sawMethod("session/cancel"), "settled turn left a stray timeout cancel")
+}
+
+func TestACPSession_AttachmentsRemovedWhenTheTurnSettles(t *testing.T) {
+	workDir := t.TempDir()
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", workDir: workDir})
+
+	require.NoError(t, s.Send("look at this", []core.ImageAttachment{{
+		MimeType: "image/png",
+		Data:     []byte("png-bytes"),
+	}}, nil))
+	req := f.expect("session/prompt")
+	f.promptResult(req.ID, "end_turn", 10, 2)
+	drainSessionEvents(t, s)
+
+	entries, err := os.ReadDir(filepath.Join(workDir, ".cc-connect", "attachments"))
+	require.NoError(t, err)
+	assert.Empty(t, entries, "staged attachments must be removed after the turn")
+}
+
+func collectText(events []core.Event) string {
+	var b strings.Builder
+	for _, evt := range events {
+		if evt.Type == core.EventText {
+			b.WriteString(evt.Content)
+		}
+	}
+	return b.String()
+}
+
+func countResults(events []core.Event) int {
+	n := 0
+	for _, evt := range events {
+		if evt.Type == core.EventResult {
+			n++
+		}
+	}
+	return n
+}
+
+func TestACPSession_CancelTurnReportsSettleTimeout(t *testing.T) {
+	old := acpCancelWait
+	acpCancelWait = 80 * time.Millisecond
+	t.Cleanup(func() { acpCancelWait = old })
+
+	s, f := startFakeACP(t, acpConfig{mode: "yolo"})
+	require.NoError(t, s.Send("long job", nil, nil))
+	f.expect("session/prompt")
+
+	// The agent ignores session/cancel here: /stop must report failure so the
+	// engine can fall back to closing the session rather than reporting a stop
+	// that never happened.
+	err := s.CancelTurn()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not settle")
+}
+
+func TestACPSession_SteerFallbackEmitsOneTerminalResultEvenWhenPrimarySettlesLate(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", nativeSteer: false})
+
+	require.NoError(t, s.Send("do the long thing", nil, nil))
+	primary := f.expect("session/prompt")
+
+	steerDone := make(chan error, 1)
+	go func() { steerDone <- s.Steer("new plan") }()
+	require.Eventually(t, func() bool { return f.sawMethod("session/cancel") }, 2*time.Second, 10*time.Millisecond)
+
+	// Cancelled primary settles first; the replacement prompt is started after
+	// the adapter observed the queue emptied. With a global cancel reason this
+	// ordering produced a second Done event.
+	f.promptResult(primary.ID, "cancelled", 0, 0)
+	replacement := f.expect("session/prompt")
+	f.text("answer for the new plan")
+	f.promptResult(replacement.ID, "end_turn", 10, 3)
+
+	require.NoError(t, <-steerDone)
+	events := drainSessionEvents(t, s)
+	assert.Equal(t, 1, countResults(events))
+
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("stray event after the replacement turn finished: %+v", evt)
+	case <-time.After(300 * time.Millisecond):
+	}
 }

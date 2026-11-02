@@ -66,6 +66,21 @@ func ensureSteerHome(realHome, overlayDir string) (string, error) {
 	if overlayDir == "" {
 		overlayDir = defaultSteerHomeDir()
 	}
+	// Never point the overlay at the real home: that would rewrite the user's
+	// config (the one thing this design promises not to touch) and the stale
+	// entry replacement below could remove real entries.
+	realAbs, err := filepath.Abs(realHome)
+	if err != nil {
+		return "", fmt.Errorf("grok: resolve %q: %w", realHome, err)
+	}
+	overlayAbs, err := filepath.Abs(overlayDir)
+	if err != nil {
+		return "", fmt.Errorf("grok: resolve %q: %w", overlayDir, err)
+	}
+	if realAbs == overlayAbs {
+		return "", fmt.Errorf("grok: steer home must differ from GROK_HOME (%q)", overlayAbs)
+	}
+	overlayDir = overlayAbs
 	if err := os.MkdirAll(overlayDir, 0o700); err != nil {
 		return "", fmt.Errorf("grok: create steer home %q: %w", overlayDir, err)
 	}
@@ -104,11 +119,28 @@ func linkHomeEntries(realHome, overlayDir string) error {
 				if resolved, rerr := os.Readlink(link); rerr == nil && resolved == target {
 					continue
 				}
-			}
-			// A stale overlay entry: replace it so the overlay cannot shadow a
-			// real home entry with stale content.
-			if rerr := os.RemoveAll(link); rerr != nil {
-				return fmt.Errorf("grok: replace %q: %w", link, rerr)
+				// A stale symlink: drop it and re-link below.
+				if rerr := os.Remove(link); rerr != nil {
+					return fmt.Errorf("grok: replace %q: %w", link, rerr)
+				}
+			} else if existing.IsDir() {
+				entries, derr := os.ReadDir(link)
+				if derr != nil {
+					return fmt.Errorf("grok: inspect %q: %w", link, derr)
+				}
+				if len(entries) > 0 {
+					// The CLI wrote state into the overlay before this entry
+					// existed in the real home. Refuse to destroy it: the operator
+					// has to look.
+					return fmt.Errorf("grok: overlay entry %q is a non-empty directory; move or remove it before reusing this steer home", link)
+				}
+				if rerr := os.Remove(link); rerr != nil {
+					return fmt.Errorf("grok: replace %q: %w", link, rerr)
+				}
+			} else {
+				if rerr := os.Remove(link); rerr != nil {
+					return fmt.Errorf("grok: replace %q: %w", link, rerr)
+				}
 			}
 		}
 		if err := os.Symlink(target, link); err != nil {
@@ -131,37 +163,66 @@ func writeSteerConfig(srcPath, dstPath string) error {
 	if current, cerr := os.ReadFile(dstPath); cerr == nil && string(current) == desired {
 		return nil
 	}
-	if err := os.WriteFile(dstPath, []byte(desired), 0o600); err != nil {
-		return fmt.Errorf("grok: write %q: %w", dstPath, err)
+	// Write through a temp file so a concurrent session never reads a half
+	// written config.
+	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".config-*.toml")
+	if err != nil {
+		return fmt.Errorf("grok: create temp config for %q: %w", dstPath, err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.WriteString(desired); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("grok: write %q: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("grok: close %q: %w", tmpName, err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("grok: chmod %q: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, dstPath); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("grok: install %q: %w", dstPath, err)
 	}
 	return nil
 }
 
 // injectFollowUpSteer returns the config text with mid-turn follow-ups set to
-// steer, preserving the rest of the file byte for byte.
+// steer. Only `[ui] follow_up_behavior` is touched: the rest of the file,
+// including comments, keeps its original text, and a same-named key in another
+// table is left alone.
 func injectFollowUpSteer(config string) string {
 	const key = "follow_up_behavior"
 	const want = `follow_up_behavior = "steer"`
 
 	lines := strings.Split(config, "\n")
+	table := ""
+	uiSection := -1
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, key) {
+		if name, ok := tomlTableName(trimmed); ok {
+			table = name
+			if name == "ui" && uiSection < 0 {
+				uiSection = i
+			}
 			continue
 		}
-		rest := strings.TrimPrefix(trimmed, key)
-		if rest != "" && !strings.HasPrefix(rest, " ") && !strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "\t") {
+		if table != "ui" {
 			continue
 		}
-		lines[i] = want
+		indent, comment, ok := matchFollowUpLine(line, key)
+		if !ok {
+			continue
+		}
+		lines[i] = indent + want + comment
 		return strings.Join(lines, "\n")
 	}
 
-	for i, line := range lines {
-		if strings.TrimSpace(line) != "[ui]" {
-			continue
-		}
-		lines = append(lines[:i+1], append([]string{want}, lines[i+1:]...)...)
+	if uiSection >= 0 {
+		lines = append(lines[:uiSection+1], append([]string{want}, lines[uiSection+1:]...)...)
 		return strings.Join(lines, "\n")
 	}
 
@@ -172,4 +233,49 @@ func injectFollowUpSteer(config string) string {
 		config += "\n"
 	}
 	return config + "[ui]\n" + want + "\n"
+}
+
+// tomlTableName reports the table declared by a header line such as `[ui]` or
+// `[[projects]]`.
+func tomlTableName(trimmed string) (string, bool) {
+	if !strings.HasPrefix(trimmed, "[") {
+		return "", false
+	}
+	end := strings.IndexByte(trimmed, ']')
+	if end < 0 {
+		return "", false
+	}
+	name := strings.Trim(trimmed[1:end], "[] ")
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// matchFollowUpLine splits one `follow_up_behavior = <value>` assignment into
+// its indentation and trailing comment, so the value can be replaced without
+// dropping either.
+func matchFollowUpLine(line, key string) (indent, comment string, ok bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, key) {
+		return "", "", false
+	}
+	rest := trimmed[len(key):]
+	if !strings.HasPrefix(strings.TrimSpace(rest), "=") {
+		return "", "", false
+	}
+	eq := strings.IndexByte(line, '=')
+	if eq < 0 {
+		return "", "", false
+	}
+	indent = line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	if hash := strings.IndexByte(line[eq:], '#'); hash >= 0 {
+		// Keep the original whitespace and text of the trailing comment.
+		start := eq + hash
+		for start > eq && (line[start-1] == ' ' || line[start-1] == '\t') {
+			start--
+		}
+		comment = line[start:]
+	}
+	return indent, comment, true
 }

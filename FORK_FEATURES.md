@@ -437,8 +437,10 @@ agent worked was queued until the turn ended and `/stop` killed the process.
   the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlays are confined to an allowlist
   that excludes `ui`, and ACP's `session/set_config_option` exposes only `model`
   and `reasoning_effort`. cc-connect therefore generates an overlay GROK_HOME
-  (`agent/grok/steerhome.go`): `config.toml` is the user's config with
-  `[ui] follow_up_behavior = "steer"` enforced (byte-for-byte elsewhere), every
+  (`agent/grok/steerhome.go`): `config.toml` is the user's config with only
+  `[ui] follow_up_behavior` rewritten to `"steer"` (comments, formatting and
+  every other key — including a same-named key in a different table — are left
+  untouched), every
   other entry of the real home is symlinked so auth, sessions, skills, plugins
   and caches stay shared, and the user's own config file is never modified. A
   steered prompt settles as `stopReason: "cancelled"` when the agent folded it
@@ -455,7 +457,10 @@ agent worked was queued until the turn ended and `/stop` killed the process.
   **notification** (as a request it returns `-32601`, which is easy to get
   wrong) and keeps the process and conversation alive, so the engine's
   canceller path preserves the interactive state instead of closing and
-  rebuilding the agent session.
+  rebuilding the agent session. If the cancelled prompt does not settle within
+  30 s the adapter reports failure, and the engine falls back to closing the
+  session — /stop must guarantee a stop, and the stored session id still
+  resumes the conversation on the next message.
 - Live switching: `SetLiveModel` / `SetLiveReasoningEffort` use
   `session/set_config_option` with `configId` `model` / `reasoning_effort`.
 - Permissions: with `mode = "yolo"` (or `accept_edits` / `dont_ask`) the child
@@ -466,13 +471,24 @@ agent worked was queued until the turn ended and `/stop` killed the process.
 - Config: `backend = "acp" | "headless"` (default `acp`),
   `steer_delivery = "native" | "cancel"` (default `native`), optional
   `steer_home` to pin the generated overlay. `max_turns` is headless-only.
+  Upgrade note: existing `grok` projects switch transport on upgrade with no
+  config change — the session id in the store is reused through `session/load`,
+  and the first turn of a conversation resumes the same grok session.
+- Known duplication: `agent/acp` is the repository's generic ACP client, but its
+  transport and session types are package-private and its `Send` blocks on the
+  prompt, with no steer, no live model/effort switch and no per-turn cancel
+  reason. Consolidating both agents onto one ACP client means exporting that
+  transport and adding an async prompt + `SessionSteerer` there; until that
+  refactor lands, `agent/grok` carries its own client (roughly the framing layer
+  of `agent/acp/rpc.go` plus grok's `_meta`/catalog/config-option mapping).
 - Verified live against grok 1.0.70 (`GROK_LOCAL_INTEGRATION=1 go test
   ./agent/grok -run TestLocalACP`): single turn, native steer injected into a
   running turn without a second turn, `/stop` keeping the conversation, and
   `session/load` resume across processes.
 - Transport-level tests (`agent/grok/acp_test.go`) drive a scripted fake agent
-  over pipes, so the frame handling, steer folding, cancel and permission flows
-  are covered without the CLI.
+  over pipes, so the frame handling, steer folding, cancel (including a
+  settle timeout), the steer fallback, permission round trip, attachment cleanup
+  and the stray-turn-timeout guard are covered without the CLI.
 - Fork commit: [167a2bda](https://github.com/utensil/cc-connect/commit/167a2bda)
   on `feat/grok-acp`, [PR #20](https://github.com/utensil/cc-connect/pull/20).
   Supersedes the headless transport as the default; `backend = "headless"`

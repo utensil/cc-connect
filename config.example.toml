@@ -1918,7 +1918,9 @@ app_secret = "your-feishu-app-secret"
 #   acp keeps one `grok agent stdio` process per conversation: same-turn
 #   steering, cancel-with-keep-session for /stop, live /model and /reasoning.
 #   headless is the old one-process-per-turn transport (no steering, /stop
-#   restarts the process and rebuilds the session from --resume).
+#   restarts the process and rebuilds the session from --resume). Existing
+#   grok projects switch to acp on upgrade with no config change; the stored
+#   session id is resumed through ACP `session/load`.
 # - steer_delivery = "native" (default) | "cancel"
 #   native runs the agent against a GROK_HOME whose config.toml is yours plus
 #   `[ui] follow_up_behavior = "steer"`, so a message sent while a turn runs is

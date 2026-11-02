@@ -49,13 +49,15 @@ type acpSession struct {
 
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
+	stderr io.Writer
 	proc   *exec.Cmd
 
 	writeMu sync.Mutex
 	nextID  atomic.Int64
 
-	pendingMu sync.Mutex
-	pending   map[int64]chan acpFrame
+	pendingMu     sync.Mutex
+	pending       map[int64]chan acpFrame
+	transportDead bool
 
 	permissionMu       sync.Mutex
 	pendingPermissions map[string]pendingPermission
@@ -65,20 +67,22 @@ type acpSession struct {
 	started   atomic.Bool
 
 	// turnMu guards the in-flight prompt bookkeeping. inflight maps a request
-	// id to its kind so a steer can be told apart from the turn's own prompt.
-	turnMu       sync.Mutex
-	inflight     map[int64]promptKind
-	primary      int64
-	cancelReason cancelReason
+	// id to its kind so a steer can be told apart from the turn's own prompt;
+	// cancelReasons records why a specific turn was cancelled, because the
+	// reason must be read by that turn's own settle rather than by whichever
+	// turn happens to settle next.
+	turnMu        sync.Mutex
+	inflight      map[int64]promptKind
+	primary       int64
+	cancelReasons map[int64]cancelReason
 
-	// Stream coalescing, owned by the read loop.
+	// streamMu guards the coalescing buffers and the last usage payload, which
+	// the read loop and the prompt-settle goroutines both touch.
+	streamMu       sync.Mutex
 	pendingThought strings.Builder
 	textStreamed   bool
 	lastUsage      map[string]any
 	toolNames      map[string]string
-
-	// cleanups holds staged attachment removals for settled turns.
-	cleanups []func()
 
 	runtimeMu       sync.Mutex
 	model           string
@@ -132,7 +136,8 @@ func newACPSession(ctx context.Context, cfg acpConfig) (*acpSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grok acp: stdout pipe: %w", err)
 	}
-	cmd.Stderr = &acpStderrBuffer{}
+	stderrBuf := &acpStderrBuffer{}
+	cmd.Stderr = stderrBuf
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("grok acp: start: %w", err)
 	}
@@ -144,6 +149,7 @@ func newACPSession(ctx context.Context, cfg acpConfig) (*acpSession, error) {
 		return nil, err
 	}
 	s.proc = cmd
+	s.stderr = stderrBuf
 	slog.Info("grok acp: session started",
 		"pid", cmd.Process.Pid, "work_dir", cfg.workDir,
 		"native_steer", cfg.nativeSteer, "overlay_home", cfg.steerHome != "")
@@ -164,6 +170,7 @@ func newACPSessionWithStream(parent context.Context, cfg acpConfig, stdin io.Wri
 		pending:            make(map[int64]chan acpFrame),
 		pendingPermissions: make(map[string]pendingPermission),
 		inflight:           make(map[int64]promptKind),
+		cancelReasons:      make(map[int64]cancelReason),
 		toolNames:          make(map[string]string),
 		model:              cfg.model,
 		reasoningEffort:    cfg.reasoningEffort,
@@ -217,6 +224,11 @@ func (s *acpSession) handshake() error {
 	}
 	if err := s.request(s.ctx, "initialize", params, &init); err != nil {
 		return fmt.Errorf("grok acp: initialize: %w", err)
+	}
+	if init.ProtocolVersion != 0 && init.ProtocolVersion != 1 {
+		// Keep going: ACP is expected to stay backward compatible, but a silent
+		// version jump is the first thing to check when frames stop mapping.
+		slog.Warn("grok acp: unexpected ACP protocol version", "protocol_version", init.ProtocolVersion)
 	}
 	return s.openSession()
 }
@@ -306,25 +318,7 @@ func (s *acpSession) applySessionMode(result acpSessionOpenResult) {
 
 func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	fullPrompt, cleanup := stageTurnAttachments(s.cfg.workDir, prompt, images, files)
-	return s.promptWithCleanup(fullPrompt, promptPrimary, cleanup)
-}
-
-func (s *acpSession) promptWithCleanup(text string, kind promptKind, cleanup func()) error {
-	err := s.promptAsync(text, kind)
-	if err != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return err
-	}
-	if cleanup != nil {
-		// Attachments stay on disk while the agent works; the turn's settling
-		// goroutine removes them.
-		s.turnMu.Lock()
-		s.cleanups = append(s.cleanups, cleanup)
-		s.turnMu.Unlock()
-	}
-	return nil
+	return s.promptAsync(fullPrompt, promptPrimary, cleanup)
 }
 
 // Steer injects guidance into the running turn.
@@ -342,20 +336,34 @@ func (s *acpSession) Steer(prompt string) error {
 	}
 
 	if s.nativeSteer() {
-		return s.promptAsync(prompt, promptSteer)
+		return s.promptAsync(prompt, promptSteer, nil)
 	}
+	return s.steerByCancel(prompt, nil)
+}
 
-	slog.Debug("grok acp: native steer unavailable, cancelling before steering")
-	s.turnMu.Lock()
-	s.cancelReason = cancelForSteer
-	s.turnMu.Unlock()
+// steerByCancel delivers guidance by cancelling the running turn and opening a
+// replacement one. It backs both `steer_delivery = "cancel"` and the fallback
+// taken when a native injection is rejected by the agent. The replacement
+// prompt owns the engine turn, so the cancelled turn's settle is suppressed by
+// the per-turn cancel reason.
+func (s *acpSession) steerByCancel(prompt string, cleanup func()) error {
+	s.markCancelReason(cancelForSteer)
 	if err := s.notify("session/cancel", map[string]any{"sessionId": s.CurrentSessionID()}); err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
 		return err
 	}
 	if !s.waitForTurn(acpCancelWait) {
-		slog.Warn("grok acp: timed out waiting for the cancelled turn before steering")
+		// Starting a second prompt while the first is still running would hand
+		// the engine two terminal events; report the failure instead so the
+		// caller can keep the guidance in the queue.
+		if cleanup != nil {
+			cleanup()
+		}
+		return fmt.Errorf("grok acp: cancelled turn did not settle within %s", acpCancelWait)
 	}
-	return s.promptAsync(prompt, promptPrimary)
+	return s.promptAsync(prompt, promptPrimary, cleanup)
 }
 
 // CancelTurn stops the running turn and keeps the session (and its
@@ -366,19 +374,20 @@ func (s *acpSession) CancelTurn() error {
 	}
 	s.turnMu.Lock()
 	busy := len(s.inflight) > 0
-	if busy {
-		s.cancelReason = cancelForStop
-	}
 	s.turnMu.Unlock()
 	if !busy {
 		return nil
 	}
 
+	s.markCancelReason(cancelForStop)
 	if err := s.notify("session/cancel", map[string]any{"sessionId": s.CurrentSessionID()}); err != nil {
 		return err
 	}
 	if !s.waitForTurn(acpCancelWait) {
-		slog.Warn("grok acp: timed out waiting for the cancelled turn")
+		// Report failure so the engine falls back to closing the session: /stop
+		// must guarantee that the turn stopped, and the stored session id still
+		// resumes the conversation on the next message.
+		return fmt.Errorf("grok acp: turn did not settle within %s", acpCancelWait)
 	}
 	return nil
 }
@@ -386,6 +395,8 @@ func (s *acpSession) CancelTurn() error {
 // waitForTurn blocks until no prompt is in flight. It reports false on timeout.
 func (s *acpSession) waitForTurn(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		s.turnMu.Lock()
 		busy := len(s.inflight) > 0
@@ -399,7 +410,7 @@ func (s *acpSession) waitForTurn(timeout time.Duration) bool {
 		select {
 		case <-s.ctx.Done():
 			return false
-		case <-time.After(5 * time.Millisecond):
+		case <-ticker.C:
 		}
 	}
 }
@@ -537,14 +548,6 @@ func (s *acpSession) Close() error {
 		s.cancel()
 		s.failPending(errors.New("grok acp: session closed"))
 		s.wg.Wait()
-
-		s.turnMu.Lock()
-		cleanups := s.cleanups
-		s.cleanups = nil
-		s.turnMu.Unlock()
-		for _, cleanup := range cleanups {
-			cleanup()
-		}
 		close(s.events)
 	})
 	return nil

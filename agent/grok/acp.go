@@ -40,13 +40,14 @@ const (
 	// acpControlTimeout bounds the small bookkeeping requests issued between
 	// turns (model switch, config option, graceful close).
 	acpControlTimeout = 20 * time.Second
-	// acpCancelWait bounds how long /stop waits for the cancelled prompt to
-	// settle before reporting success anyway.
-	acpCancelWait = 30 * time.Second
 	// acpCloseGrace bounds the graceful `session/close` before the process is
 	// killed outright.
 	acpCloseGrace = 3 * time.Second
 )
+
+// acpCancelWait bounds how long a cancellation waits for the cancelled prompt
+// to settle. It is a variable so tests can shorten it.
+var acpCancelWait = 30 * time.Second
 
 // promptKind distinguishes the request that opens a user turn from the request
 // that carries steering guidance into it.
@@ -216,6 +217,11 @@ func (s *acpSession) request(ctx context.Context, method string, params any, out
 func (s *acpSession) registerPending(id int64) chan acpFrame {
 	ch := make(chan acpFrame, 1)
 	s.pendingMu.Lock()
+	if s.transportDead {
+		s.pendingMu.Unlock()
+		ch <- acpFrame{Error: &acpError{Code: -32000, Message: "grok acp: agent transport is closed"}}
+		return ch
+	}
 	s.pending[id] = ch
 	s.pendingMu.Unlock()
 	return ch
@@ -231,6 +237,7 @@ func (s *acpSession) forgetPending(id int64) {
 // gone, so no caller can hang on a dead process.
 func (s *acpSession) failPending(err error) {
 	s.pendingMu.Lock()
+	s.transportDead = true
 	pending := s.pending
 	s.pending = make(map[int64]chan acpFrame)
 	s.pendingMu.Unlock()
@@ -264,8 +271,9 @@ func (s *acpSession) readLoop(stdout io.Reader) {
 	}
 
 	if err := scanner.Err(); err != nil && s.alive.Load() && s.ctx.Err() == nil {
+		// The in-flight turn is failed through failPending below; emitting here
+		// too would give the engine a second, stale error event.
 		slog.Error("grok acp: read stdout", "error", err)
-		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("grok acp: read stdout: %w", err)})
 	}
 
 	// The process is gone: fail waiters and mark the session dead so the engine
@@ -273,7 +281,11 @@ func (s *acpSession) readLoop(stdout io.Reader) {
 	wasAlive := s.alive.Swap(false)
 	s.failPending(errors.New("grok acp: agent process exited"))
 	if wasAlive && s.ctx.Err() == nil {
-		slog.Warn("grok acp: agent process exited")
+		stderrTail := ""
+		if buf, ok := s.stderr.(*acpStderrBuffer); ok {
+			stderrTail = truncate(buf.String(), 800)
+		}
+		slog.Warn("grok acp: agent process exited", "stderr", stderrTail)
 	}
 }
 
@@ -435,12 +447,16 @@ func (s *acpSession) handleSessionUpdate(raw json.RawMessage) {
 			return
 		}
 		s.flushThought()
+		s.streamMu.Lock()
 		s.textStreamed = true
+		s.streamMu.Unlock()
 		s.emit(core.Event{Type: core.EventText, Content: text, SessionID: s.CurrentSessionID()})
 
 	case "agent_thought_chunk":
 		if text := acpTextContent(update.Content); text != "" {
+			s.streamMu.Lock()
 			s.pendingThought.WriteString(text)
+			s.streamMu.Unlock()
 		}
 
 	case "tool_call":
@@ -450,7 +466,9 @@ func (s *acpSession) handleSessionUpdate(raw json.RawMessage) {
 			name = update.Kind
 		}
 		if update.ToolCallID != "" && name != "" {
+			s.streamMu.Lock()
 			s.toolNames[update.ToolCallID] = name
+			s.streamMu.Unlock()
 		}
 		s.emit(core.Event{
 			Type:      core.EventToolUse,
@@ -468,6 +486,7 @@ func (s *acpSession) handleSessionUpdate(raw json.RawMessage) {
 		s.flushThought()
 		result := acpToolResultText(update.RawOutput, update.Content)
 		name := s.toolNames[update.ToolCallID]
+		delete(s.toolNames, update.ToolCallID)
 		if name == "" {
 			name = update.Title
 		}
@@ -518,87 +537,144 @@ func (s *acpSession) turnActive() bool {
 }
 
 func (s *acpSession) flushThought() {
+	s.streamMu.Lock()
 	if s.pendingThought.Len() == 0 {
+		s.streamMu.Unlock()
 		return
 	}
 	text := s.pendingThought.String()
 	s.pendingThought.Reset()
+	s.streamMu.Unlock()
 	if strings.TrimSpace(text) == "" {
 		return
 	}
 	s.emit(core.Event{Type: core.EventThinking, Content: text, SessionID: s.CurrentSessionID()})
 }
 
+// promptTurn is one in-flight session/prompt: the engine turn's own prompt, a
+// steering injection, or the replacement prompt of a steer fallback.
+type promptTurn struct {
+	id      int64
+	kind    promptKind
+	text    string
+	cleanup func()
+	timer   *time.Timer
+}
+
 // promptAsync starts a turn (promptPrimary) or injects guidance into the
 // running turn (promptSteer). The settled response is handled on its own
 // goroutine so Send/Steer never block the engine while the model works.
-func (s *acpSession) promptAsync(text string, kind promptKind) error {
+func (s *acpSession) promptAsync(text string, kind promptKind, cleanup func()) error {
 	if !s.alive.Load() {
+		if cleanup != nil {
+			cleanup()
+		}
 		return fmt.Errorf("grok acp: session is closed")
 	}
 	if strings.TrimSpace(text) == "" {
+		if cleanup != nil {
+			cleanup()
+		}
 		return fmt.Errorf("grok acp: prompt is empty")
 	}
 	sessionID := s.CurrentSessionID()
 	if sessionID == "" {
+		if cleanup != nil {
+			cleanup()
+		}
 		return fmt.Errorf("grok acp: session id is not ready")
 	}
 
-	id := s.nextID.Add(1)
-	ch := s.registerPending(id)
-	settled := make(chan struct{})
+	turn := &promptTurn{id: s.nextID.Add(1), kind: kind, text: text, cleanup: cleanup}
+	ch := s.registerPending(turn.id)
 
 	s.turnMu.Lock()
-	if s.inflight == nil {
-		s.inflight = make(map[int64]promptKind)
-	}
-	s.inflight[id] = kind
+	s.inflight[turn.id] = kind
 	if kind == promptPrimary {
-		s.primary = id
+		s.primary = turn.id
 	}
 	s.turnMu.Unlock()
 
-	params := map[string]any{
-		"sessionId": sessionID,
-		"prompt":    []map[string]any{{"type": "text", "text": text}},
-	}
 	frame := map[string]any{
 		"jsonrpc": "2.0",
-		"id":      id,
+		"id":      turn.id,
 		"method":  "session/prompt",
-		"params":  params,
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"prompt":    []map[string]any{{"type": "text", "text": text}},
+		},
 	}
 	if err := s.writeFrame(frame); err != nil {
-		s.forgetPending(id)
-		s.clearInflight(id)
-		close(settled)
+		s.forgetPending(turn.id)
+		s.clearInflight(turn.id)
+		if turn.cleanup != nil {
+			turn.cleanup()
+		}
 		return err
+	}
+
+	// A configured turn timeout still applies to the ACP transport: cancel the
+	// turn when it expires rather than leaving the user waiting forever. The
+	// timer is stopped when the turn settles, so it can never cancel a later
+	// turn.
+	if s.cfg.timeout > 0 {
+		turn.timer = time.AfterFunc(s.cfg.timeout, func() {
+			s.turnMu.Lock()
+			active := s.primary == turn.id
+			s.turnMu.Unlock()
+			if !active {
+				return
+			}
+			slog.Warn("grok acp: turn timeout reached, cancelling",
+				"timeout", s.cfg.timeout, "prompt_id", turn.id)
+			_ = s.notify("session/cancel", map[string]any{"sessionId": sessionID})
+		})
 	}
 
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer close(settled)
-		var frame acpFrame
+		var reply acpFrame
 		select {
-		case frame = <-ch:
+		case reply = <-ch:
 		case <-s.ctx.Done():
-			frame = acpFrame{Error: &acpError{Code: -32000, Message: "session closed"}}
+			reply = acpFrame{Error: &acpError{Code: -32000, Message: "session closed"}}
 		}
-		s.forgetPending(id)
-		s.clearInflight(id)
-		s.settlePrompt(kind, frame)
+		if turn.timer != nil {
+			turn.timer.Stop()
+		}
+		s.forgetPending(turn.id)
+		s.clearInflight(turn.id)
+		if turn.cleanup != nil {
+			// Attachment files must survive the turn (the agent may read them at
+			// any point), so they are removed only once it settles.
+			turn.cleanup()
+			turn.cleanup = nil
+		}
+		s.settlePrompt(turn, reply)
 	}()
-
-	// A configured turn timeout still applies to the ACP transport: cancel the
-	// turn when it expires rather than leaving the user waiting forever.
-	if s.cfg.timeout > 0 {
-		time.AfterFunc(s.cfg.timeout, func() {
-			slog.Warn("grok acp: turn timeout reached, cancelling", "timeout", s.cfg.timeout)
-			_ = s.notify("session/cancel", map[string]any{"sessionId": sessionID})
-		})
-	}
 	return nil
+}
+
+// markCancelReason records why the turn that is running now is being
+// cancelled, so its own settle can decide whether to close the engine turn.
+func (s *acpSession) markCancelReason(reason cancelReason) int64 {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if s.primary == 0 {
+		return 0
+	}
+	s.cancelReasons[s.primary] = reason
+	return s.primary
+}
+
+// takeCancelReason consumes the reason recorded for one turn id.
+func (s *acpSession) takeCancelReason(id int64) cancelReason {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	reason := s.cancelReasons[id]
+	delete(s.cancelReasons, id)
+	return reason
 }
 
 func (s *acpSession) clearInflight(id int64) {
@@ -611,10 +687,25 @@ func (s *acpSession) clearInflight(id int64) {
 }
 
 // settlePrompt turns a settled session/prompt reply into engine events.
-func (s *acpSession) settlePrompt(kind promptKind, frame acpFrame) {
+func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 	s.flushThought()
 
 	if frame.Error != nil {
+		if turn.kind == promptSteer {
+			// A rejected steering injection must not surface as a turn error: the
+			// engine would end the primary turn on the spot. Fall back to
+			// cancel-and-continue so the guidance is still delivered.
+			slog.Warn("grok acp: steering injection failed, falling back to cancel-and-continue",
+				"error", frame.Error)
+			if err := s.steerByCancel(turn.text, nil); err != nil {
+				// The engine already acknowledged this message as steered, so
+				// there is no queue to fall back to; surface it loudly instead of
+				// ending the running turn with an error event.
+				slog.Error("grok acp: steering fallback failed, guidance was not delivered",
+					"error", err)
+			}
+			return
+		}
 		s.emit(core.Event{
 			Type:      core.EventError,
 			SessionID: s.CurrentSessionID(),
@@ -631,7 +722,7 @@ func (s *acpSession) settlePrompt(kind promptKind, frame acpFrame) {
 	}
 	stopReason := strings.ToLower(strings.TrimSpace(result.StopReason))
 
-	if kind == promptSteer {
+	if turn.kind == promptSteer {
 		// A steered prompt settles as "cancelled" when the agent folded it into
 		// the running turn: the running turn carries the answer, so there is
 		// nothing to finish here.
@@ -643,18 +734,12 @@ func (s *acpSession) settlePrompt(kind promptKind, frame acpFrame) {
 		// it while the agent is blocked on a long tool call, a background task
 		// or a subagent. When the turn ends first, the guidance simply runs as
 		// its own turn; emit the terminal event so its text is not dropped.
-		slog.Info("grok acp: steer ran as its own turn",
-			"stop_reason", stopReason)
+		slog.Info("grok acp: steer ran as its own turn", "stop_reason", stopReason)
 		s.emitPromptResult(result)
 		return
 	}
 
-	s.turnMu.Lock()
-	reason := s.cancelReason
-	if reason != cancelNone {
-		s.cancelReason = cancelNone
-	}
-	s.turnMu.Unlock()
+	reason := s.takeCancelReason(turn.id)
 
 	if stopReason == "cancelled" {
 		if reason == cancelForSteer {
@@ -684,20 +769,24 @@ func (s *acpSession) emitPromptResult(result acpPromptResult) {
 }
 
 func (s *acpSession) applyTokenMeta(evt *core.Event, result acpPromptResult) {
+	s.streamMu.Lock()
+	usage := s.lastUsage
+	s.streamMu.Unlock()
+
 	if result.Meta.InputTokens > 0 {
 		evt.InputTokens = result.Meta.InputTokens
-	} else if s.lastUsage != nil {
-		evt.InputTokens = intFromAny(s.lastUsage["inputTokens"])
+	} else if usage != nil {
+		evt.InputTokens = intFromAny(usage["inputTokens"])
 		if evt.InputTokens == 0 {
-			evt.InputTokens = intFromAny(s.lastUsage["input_tokens"])
+			evt.InputTokens = intFromAny(usage["input_tokens"])
 		}
 	}
 	if result.Meta.OutputTokens > 0 {
 		evt.OutputTokens = result.Meta.OutputTokens
-	} else if s.lastUsage != nil {
-		evt.OutputTokens = intFromAny(s.lastUsage["outputTokens"])
+	} else if usage != nil {
+		evt.OutputTokens = intFromAny(usage["outputTokens"])
 		if evt.OutputTokens == 0 {
-			evt.OutputTokens = intFromAny(s.lastUsage["output_tokens"])
+			evt.OutputTokens = intFromAny(usage["output_tokens"])
 		}
 	}
 	if result.Meta.CachedRead > 0 {
@@ -718,7 +807,9 @@ func (s *acpSession) storeUsage(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &usage); err != nil {
 		return
 	}
+	s.streamMu.Lock()
 	s.lastUsage = usage
+	s.streamMu.Unlock()
 }
 
 // acpTextContent pulls text out of an ACP content block. Chunks carry

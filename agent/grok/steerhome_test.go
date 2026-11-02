@@ -118,3 +118,47 @@ func TestEnsureSteerHome_RejectsMissingHome(t *testing.T) {
 	_, err := ensureSteerHome(filepath.Join(t.TempDir(), "missing"), t.TempDir())
 	require.Error(t, err)
 }
+
+func TestInjectFollowUpSteer_PreservesTrailingComment(t *testing.T) {
+	in := "[ui]\nfollow_up_behavior = \"queue\"   # TUI preference\nmax_thoughts_width = 120\n"
+	out := injectFollowUpSteer(in)
+	assert.Contains(t, out, "follow_up_behavior = \"steer\"   # TUI preference")
+	assert.Contains(t, out, "max_thoughts_width = 120")
+}
+
+func TestInjectFollowUpSteer_LeavesOtherTablesAlone(t *testing.T) {
+	in := "[models]\nfollow_up_behavior = \"queue\"\n"
+	out := injectFollowUpSteer(in)
+	// The unrelated key keeps its value; a proper [ui] section is added.
+	assert.Contains(t, out, "[models]\nfollow_up_behavior = \"queue\"\n")
+	assert.Contains(t, out, "[ui]\nfollow_up_behavior = \"steer\"")
+}
+
+func TestInjectFollowUpSteer_ReplacesOnlyTheUISection(t *testing.T) {
+	in := "[models]\nfollow_up_behavior = \"queue\"\n\n[ui]\nfollow_up_behavior = \"queue\"\n"
+	out := injectFollowUpSteer(in)
+	assert.Contains(t, out, "[models]\nfollow_up_behavior = \"queue\"\n")
+	assert.Contains(t, out, "[ui]\nfollow_up_behavior = \"steer\"\n")
+}
+
+func TestEnsureSteerHome_RefusesToDestroyOverlayState(t *testing.T) {
+	realHome := t.TempDir()
+	overlay := filepath.Join(t.TempDir(), "overlay")
+	require.NoError(t, os.WriteFile(filepath.Join(realHome, "config.toml"), []byte(""), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(overlay, "sessions", "kept"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(overlay, "sessions", "kept", "state"), []byte("x"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(realHome, "sessions"), 0o700))
+
+	_, err := ensureSteerHome(realHome, overlay)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-empty directory")
+}
+
+func TestEnsureSteerHome_RejectsOverlayEqualToRealHome(t *testing.T) {
+	realHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(realHome, "config.toml"), []byte(""), 0o600))
+
+	_, err := ensureSteerHome(realHome, realHome)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must differ")
+}
