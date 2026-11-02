@@ -6536,14 +6536,38 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // sends an error notification to each queued message's sender. Called when
 // the event loop exits abnormally (EventError, channel closed) and queued
 // messages can no longer be delivered to the agent.
+// notifyDroppedQueuedMessages discards the session's queued follow-ups and
+// tells the user once, in their language, how many were dropped. Previously it
+// replied to every queued message with a raw transport error ("session reset",
+// "agent session ended"), which read like the agent had crashed and produced one
+// scary bubble per message.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
 	state.mu.Lock()
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
+	platform := state.platform
+	replyCtx := state.replyCtx
 	state.mu.Unlock()
-	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+
+	if len(remaining) == 0 {
+		return
 	}
+	// Answer on the newest queued message so the notice lands where the user is
+	// looking, even when the state's own platform/replyCtx were already cleared.
+	last := remaining[len(remaining)-1]
+	if last.platform != nil {
+		platform = last.platform
+	}
+	if last.replyCtx != nil {
+		replyCtx = last.replyCtx
+	}
+
+	slog.Info("dropped queued follow-up messages",
+		"count", len(remaining), "reason", reason)
+	if platform == nil {
+		return
+	}
+	e.send(platform, replyCtx, fmt.Sprintf(e.i18n.T(MsgQueuedDiscarded), len(remaining)))
 }
 
 // drainPendingMessages processes all queued messages in the state's pendingMessages
@@ -6590,7 +6614,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			// Put this message back so the single discard notice reports the
+			// true count instead of one error bubble per message.
+			state.mu.Lock()
+			state.pendingMessages = append([]queuedMessage{queued}, state.pendingMessages...)
+			state.mu.Unlock()
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
@@ -10963,9 +10991,11 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if pending != nil {
 			pending.resolve()
 		}
-		if notifyQueued {
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
-		} else {
+		// Keep the queued follow-ups: the cancelled turn still finishes its event
+		// loop, and that loop drains pendingMessages as the next turn. /stop is
+		// meant to stop the work in flight, not to throw away instructions the
+		// user already sent. A silent stop (internal restart) still clears them.
+		if !notifyQueued {
 			state.mu.Lock()
 			state.pendingMessages = nil
 			state.mu.Unlock()
