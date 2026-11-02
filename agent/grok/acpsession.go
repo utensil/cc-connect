@@ -264,7 +264,7 @@ func (s *acpSession) handshake() error {
 type acpSessionOpenResult struct {
 	SessionID     string               `json:"sessionId"`
 	Models        acpSessionModelState `json:"models"`
-	ConfigOptions []json.RawMessage    `json:"configOptions"`
+	ConfigOptions []acpConfigOption    `json:"configOptions"`
 	Modes         struct {
 		CurrentModeID  string `json:"currentModeId"`
 		AvailableModes []struct {
@@ -272,6 +272,14 @@ type acpSessionOpenResult struct {
 			Name string `json:"name"`
 		} `json:"availableModes"`
 	} `json:"modes"`
+}
+
+// acpConfigOption is one row of the session config catalog reported by
+// session/new and session/load. `model` and `reasoning_effort` are the rows this
+// adapter writes; currentValue is what the session will actually use.
+type acpConfigOption struct {
+	ID           string `json:"id"`
+	CurrentValue string `json:"currentValue"`
 }
 
 func (s *acpSession) openSession() error {
@@ -296,6 +304,7 @@ func (s *acpSession) openSession() error {
 			}
 			s.sessionID.Store(id)
 			s.applySessionMode(loaded)
+			s.applySpawnRuntime(loaded)
 			slog.Info("grok acp: session resumed", "session_id", id)
 			return nil
 		}
@@ -316,8 +325,53 @@ func (s *acpSession) openSession() error {
 	}
 	s.sessionID.Store(created.SessionID)
 	s.applySessionMode(created)
+	s.applySpawnRuntime(created)
 	slog.Info("grok acp: session created", "session_id", created.SessionID)
 	return nil
+}
+
+// applySpawnRuntime pushes the configured model and reasoning effort into the
+// session.
+//
+// The `-m` / `--reasoning-effort` flags handed to `grok agent stdio` do not
+// change the session runtime on grok 1.0.70: a child spawned with `-m grok-4.6`
+// still opens (and uses) grok-4.7, and `--reasoning-effort low` still runs at the
+// account default. ACP exposes both as session config options, so the adapter
+// applies them explicitly, right after session/new or session/load — the same
+// guarantee the codex app-server gets from the per-turn `effort` field, and the
+// reason a configured effort also reaches grok's own subagents. Values the
+// session already runs at are not re-sent; a failure is logged and the session
+// keeps working with the agent's own default.
+func (s *acpSession) applySpawnRuntime(result acpSessionOpenResult) {
+	current := make(map[string]string, len(result.ConfigOptions))
+	for _, opt := range result.ConfigOptions {
+		if opt.ID != "" {
+			current[opt.ID] = opt.CurrentValue
+		}
+	}
+
+	for _, want := range []struct{ configID, value string }{
+		{"model", s.cfg.model},
+		{"reasoning_effort", s.cfg.reasoningEffort},
+	} {
+		value := strings.TrimSpace(want.value)
+		if value == "" || current[want.configID] == value {
+			continue
+		}
+		if err := s.setConfigOption(want.configID, value); err != nil {
+			slog.Warn("grok acp: spawn runtime not applied",
+				"config_id", want.configID, "value", value, "error", err)
+			continue
+		}
+		s.runtimeMu.Lock()
+		if want.configID == "model" {
+			s.model = value
+		} else {
+			s.reasoningEffort = value
+		}
+		s.runtimeMu.Unlock()
+		slog.Info("grok acp: spawn runtime applied", "config_id", want.configID, "value", value)
+	}
 }
 
 // applySessionMode maps cc-connect's plan mode onto the ACP session mode when
@@ -482,9 +536,25 @@ func (s *acpSession) SetLiveReasoningEffort(effort string) bool {
 }
 
 func (s *acpSession) setConfigOption(configID, value string) error {
-	var out json.RawMessage
 	ctx, cancel := context.WithTimeout(s.ctx, acpControlTimeout)
 	defer cancel()
+
+	var out json.RawMessage
+	// Grok's `SessionConfigOptionValue` is an untagged enum that takes the bare
+	// value. The `{"value": …}` wrapper is rejected with -32602 "Invalid
+	// params" on 1.0.70, so keep it only as a fallback for builds that expect
+	// the wrapped shape.
+	err := s.request(ctx, "session/set_config_option", map[string]any{
+		"sessionId": s.CurrentSessionID(),
+		"configId":  configID,
+		"value":     value,
+	}, &out)
+	if err == nil {
+		return nil
+	}
+	if acpErr, ok := err.(*acpError); !ok || acpErr.Code != -32602 {
+		return err
+	}
 	return s.request(ctx, "session/set_config_option", map[string]any{
 		"sessionId": s.CurrentSessionID(),
 		"configId":  configID,
