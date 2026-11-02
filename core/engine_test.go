@@ -17362,3 +17362,127 @@ func TestCmdModel_UsesSessionEffectiveAgent(t *testing.T) {
 		t.Fatalf("/model reply = %q, must not show base agent model codex-default", p.sent[0])
 	}
 }
+
+// cancellableStubSession models an ACP/Pi-style session that can cancel a turn
+// without tearing the session down.
+type cancellableStubSession struct {
+	stubAgentSession
+	cancels int
+}
+
+func (s *cancellableStubSession) CancelTurn() error {
+	s.cancels++
+	return nil
+}
+
+func newStopQueueTestEngine(p Platform) *Engine {
+	return NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+}
+
+func queueTwoStopTestMessages(state *interactiveState, p Platform) {
+	state.pendingMessages = []queuedMessage{
+		{platform: p, replyCtx: "ctx-1", content: "first follow-up"},
+		{platform: p, replyCtx: "ctx-2", content: "second follow-up"},
+	}
+}
+
+// TestStop_DiscardsQueueWithOneLocalizedNotice pins the fix for the /stop noise:
+// dropping queued follow-ups must send a single localized line, not one raw
+// transport error ("session reset") per queued message.
+func TestStop_DiscardsQueueWithOneLocalizedNotice(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newStopQueueTestEngine(p)
+	defer e.Stop()
+
+	session := &stubAgentSession{}
+	iKey := "test:user1"
+	e.interactiveMu.Lock()
+	state := &interactiveState{agentSession: session, platform: p, replyCtx: "ctx-1"}
+	queueTwoStopTestMessages(state, p)
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	if !e.stopInteractiveSessionWithOptions(iKey, true) {
+		t.Fatal("stopInteractiveSessionWithOptions returned false, want true")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d messages, want exactly 1: %v", len(sent), sent)
+	}
+	if !strings.Contains(sent[0], "2") || !strings.Contains(strings.ToLower(sent[0]), "discard") {
+		t.Fatalf("notice = %q, want a discard notice with the count", sent[0])
+	}
+	if strings.Contains(strings.ToLower(sent[0]), "session reset") {
+		t.Fatalf("notice still leaks the raw transport reason: %q", sent[0])
+	}
+
+	state.mu.Lock()
+	remaining := len(state.pendingMessages)
+	state.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("pendingMessages = %d, want 0 after a non-cancellable stop", remaining)
+	}
+}
+
+// TestStop_CancellableSessionKeepsQueuedFollowUps pins the other half: when the
+// agent session survives /stop, the queued instructions stay queued so the
+// cancelled turn's drain can run them, and nothing is discarded.
+func TestStop_CancellableSessionKeepsQueuedFollowUps(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newStopQueueTestEngine(p)
+	defer e.Stop()
+
+	session := &cancellableStubSession{}
+	iKey := "test:user1"
+	e.interactiveMu.Lock()
+	state := &interactiveState{agentSession: session, platform: p, replyCtx: "ctx-1"}
+	queueTwoStopTestMessages(state, p)
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	if !e.stopInteractiveSessionWithOptions(iKey, true) {
+		t.Fatal("stopInteractiveSessionWithOptions returned false, want true")
+	}
+	if session.cancels != 1 {
+		t.Fatalf("CancelTurn calls = %d, want 1", session.cancels)
+	}
+
+	state.mu.Lock()
+	remaining := len(state.pendingMessages)
+	state.mu.Unlock()
+	if remaining != 2 {
+		t.Fatalf("pendingMessages = %d, want 2 (the cancelled turn drains them)", remaining)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("cancellable stop sent %v, want no discard notice", sent)
+	}
+}
+
+// TestStop_SilentStopStillClearsQueue keeps internal (non-user-facing) stops
+// from running stale follow-ups.
+func TestStop_SilentStopStillClearsQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newStopQueueTestEngine(p)
+	defer e.Stop()
+
+	iKey := "test:user1"
+	e.interactiveMu.Lock()
+	state := &interactiveState{agentSession: &cancellableStubSession{}, platform: p, replyCtx: "ctx-1"}
+	queueTwoStopTestMessages(state, p)
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	if !e.stopInteractiveSessionWithOptions(iKey, false) {
+		t.Fatal("stopInteractiveSessionWithOptions returned false, want true")
+	}
+	state.mu.Lock()
+	remaining := len(state.pendingMessages)
+	state.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("pendingMessages = %d, want 0 for a silent stop", remaining)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("silent stop sent %v, want nothing", sent)
+	}
+}
