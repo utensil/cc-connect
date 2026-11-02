@@ -47,10 +47,11 @@ type Agent struct {
 	sessionEnv      []string
 	mu              sync.RWMutex
 
-	// catalogMu guards the cached model/effort catalog probed from the CLI.
-	// It is separate from mu because a probe spawns a process and must not
-	// block model/mode reads on the hot path.
+	// catalogMu guards the cached model/effort catalog probed from the CLI, and
+	// probeMu serializes the probes themselves (they spawn processes and last up
+	// to two 6s timeouts, so neither lock may be held across a probe).
 	catalogMu    sync.Mutex
+	probeMu      sync.Mutex
 	catalogCache []catalogModel
 	catalogAt    time.Time
 }
@@ -631,7 +632,10 @@ func parseGrokSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 
 func findGrokSessionDir(sessionID string) string {
 	base := grokSessionsBaseDir()
-	if base == "" || sessionID == "" {
+	// Session ids come from /ls output today, but never let a value escape the
+	// session store directory when it is deleted recursively.
+	sessionID = filepath.Base(strings.TrimSpace(sessionID))
+	if base == "" || sessionID == "" || sessionID == "." || sessionID == ".." {
 		return ""
 	}
 	entries, err := os.ReadDir(base)

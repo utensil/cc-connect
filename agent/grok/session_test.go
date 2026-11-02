@@ -2,6 +2,7 @@ package grok
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -347,4 +348,102 @@ func TestStartSessionWithRuntimeOverrides(t *testing.T) {
 	// Agent defaults are untouched by session-scoped overrides.
 	assert.Equal(t, "grok-4.6", a.GetModel())
 	assert.Equal(t, "high", a.GetReasoningEffort())
+}
+
+// TestSendCloseRace_NoPanicOnClosedEvents is the regression guard for the
+// Send/Close race: Close closes the events channel, so a turn that passes the
+// liveness check must not emit afterwards (a panic in a goroutine would take the
+// whole bridge down). Run with -race.
+func TestSendCloseRace_NoPanicOnClosedEvents(t *testing.T) {
+	for i := 0; i < 60; i++ {
+		gs, err := newGrokSession(context.Background(), sessionConfig{
+			cmd:     "/nonexistent-grok-binary",
+			workDir: t.TempDir(),
+			mode:    "yolo",
+		})
+		require.NoError(t, err)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			// Either it is refused as closed, or it fails to start; it must
+			// never emit into a closed channel.
+			_ = gs.Send("hi", nil, nil)
+		}()
+		close(start)
+		_ = gs.Close()
+		wg.Wait()
+	}
+}
+
+// TestSendAfterCloseRefused checks the liveness gate itself.
+func TestSendAfterCloseRefused(t *testing.T) {
+	gs, err := newGrokSession(context.Background(), sessionConfig{cmd: "/nonexistent-grok-binary"})
+	require.NoError(t, err)
+	require.NoError(t, gs.Close())
+	err = gs.Send("hi", nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed")
+}
+
+// TestHandleEvent_EndDoesNotDuplicateStreamedText guards the engine's
+// fullResponse accounting: when text was streamed, the terminal frame must not
+// carry it again as EventResult.Content.
+func TestHandleEvent_EndDoesNotDuplicateStreamedText(t *testing.T) {
+	gs, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok"})
+	require.NoError(t, err)
+	defer gs.Close()
+
+	gs.handleEvent(map[string]any{"type": "text", "data": "streamed answer"})
+	gs.handleEvent(map[string]any{"type": "end", "sessionId": "s1", "data": "streamed answer"})
+
+	events := drainEvents(gs.events, 2)
+	require.Len(t, events, 2)
+	assert.Equal(t, core.EventText, events[0].Type)
+	assert.Equal(t, "streamed answer", events[0].Content)
+	assert.Equal(t, core.EventResult, events[1].Type)
+	assert.Empty(t, events[1].Content, "terminal frame must not resend streamed text")
+}
+
+// TestHandleEvent_HeaderOnlyEndUsesLastUsage covers a stream where usage arrives
+// in a standalone frame and the terminal frame has none.
+func TestHandleEvent_HeaderOnlyEndUsesLastUsage(t *testing.T) {
+	gs, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok"})
+	require.NoError(t, err)
+	defer gs.Close()
+
+	gs.lastUsage = map[string]any{"input_tokens": float64(11), "output_tokens": float64(7)}
+	terminal := gs.handleEvent(map[string]any{"type": "end", "sessionId": "s2"})
+	require.True(t, terminal)
+
+	events := drainEvents(gs.events, 1)
+	require.Len(t, events, 1)
+	assert.Equal(t, 11, events[0].InputTokens)
+	assert.Equal(t, 7, events[0].OutputTokens)
+}
+
+// TestHandleEvent_ToolFailureStatus ensures a failed tool call is marked so the
+// progress card does not render it as a success.
+func TestHandleEvent_ToolFailureStatus(t *testing.T) {
+	gs, err := newGrokSession(context.Background(), sessionConfig{cmd: "grok"})
+	require.NoError(t, err)
+	defer gs.Close()
+
+	gs.handleEvent(map[string]any{"type": "tool_call", "toolCallId": "c1", "toolName": "shell"})
+	gs.handleEvent(map[string]any{
+		"type": "tool_call_update", "toolCallId": "c1", "status": "failed",
+		"rawOutput": map[string]any{"error": "boom"},
+	})
+
+	events := drainEvents(gs.events, 2)
+	require.Len(t, events, 2)
+	assert.Equal(t, core.EventToolUse, events[0].Type)
+	assert.Equal(t, core.EventToolResult, events[1].Type)
+	assert.Equal(t, "shell", events[1].ToolName)
+	assert.Equal(t, "failed", events[1].ToolStatus)
+	require.NotNil(t, events[1].ToolSuccess)
+	assert.False(t, *events[1].ToolSuccess)
 }

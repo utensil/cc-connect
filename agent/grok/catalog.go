@@ -49,13 +49,29 @@ var fallbackModels = []catalogModel{
 var fallbackEfforts = []string{"xhigh", "high", "medium", "low"}
 
 // catalog returns the cached model catalog, probing the CLI when the cache is
-// empty or stale. Probes are serialized so concurrent commands spawn one process.
+// empty or stale. probeMu serializes probes so concurrent commands spawn one
+// process, while catalogMu is only ever held for the cache read/write — a probe
+// can take up to two 6s timeouts and must not block model/effort reads.
 func (a *Agent) catalog(ctx context.Context) []catalogModel {
 	a.catalogMu.Lock()
-	defer a.catalogMu.Unlock()
-	if len(a.catalogCache) > 0 && time.Since(a.catalogAt) < catalogTTL {
-		return a.catalogCache
+	cached := a.catalogCache
+	fresh := len(cached) > 0 && time.Since(a.catalogAt) < catalogTTL
+	a.catalogMu.Unlock()
+	if fresh {
+		return cached
 	}
+
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+	// Another goroutine may have refreshed the cache while we waited.
+	a.catalogMu.Lock()
+	if len(a.catalogCache) > 0 && time.Since(a.catalogAt) < catalogTTL {
+		cached = a.catalogCache
+		a.catalogMu.Unlock()
+		return cached
+	}
+	previous := a.catalogCache
+	a.catalogMu.Unlock()
 
 	a.mu.RLock()
 	cmdName := a.cmd
@@ -67,13 +83,12 @@ func (a *Agent) catalog(ctx context.Context) []catalogModel {
 	}
 	if len(models) == 0 {
 		// Keep a previous good result rather than degrading to the static list.
-		if len(a.catalogCache) > 0 {
-			return a.catalogCache
-		}
-		return nil
+		return previous
 	}
+	a.catalogMu.Lock()
 	a.catalogCache = models
 	a.catalogAt = time.Now()
+	a.catalogMu.Unlock()
 	return models
 }
 
