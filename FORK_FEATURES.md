@@ -471,10 +471,21 @@ agent worked was queued until the turn ended and `/stop` killed the process.
   runs with `--always-approve` plus `_meta.yoloMode`. Otherwise
   `session/request_permission` is surfaced as `core.EventPermissionRequest` and
   `RespondPermission` answers with the matching `optionId`; unknown agent→client
-  requests get `-32601` instead of hanging the turn.
+  requests get `-32601` instead of hanging the turn. `--always-approve` cannot
+  cover the requests Grok raises for Claude-compatible `deny` / `ask` rules it
+  merges from `~/.claude/settings.json` (a global `Read(.env)` deny, for
+  example), and no CLI flag, env var or `--allow` rule overrides such a rule.
+  `auto_approve_permissions = true` therefore answers those requests inside the
+  adapter, selecting the session-wide allow option (`allow_always`, falling back
+  to any allow-shaped option) and logging `grok acp: permission auto-approved`
+  instead of forwarding the prompt; a request that offers no allow option is
+  still forwarded to the platform. Default `false`, i.e. bot turns keep waiting
+  for a human reply.
 - Config: `backend = "acp" | "headless"` (default `acp`),
   `steer_delivery = "native" | "cancel"` (default `native`), optional
-  `steer_home` to pin the generated overlay. `max_turns` is headless-only.
+  `steer_home` to pin the generated overlay,
+  `auto_approve_permissions = true | false` (default `false`). `max_turns` is
+  headless-only.
   Upgrade note: existing `grok` projects switch transport on upgrade with no
   config change — the session id in the store is reused through `session/load`,
   and the first turn of a conversation resumes the same grok session.

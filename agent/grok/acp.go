@@ -384,6 +384,33 @@ func (s *acpSession) handlePermissionRequest(frame acpFrame) {
 	// or string the agent chose.
 	requestID := "acp:" + string(frame.ID)
 
+	toolName := params.ToolCall.Title
+	if toolName == "" {
+		toolName = params.ToolCall.Kind
+	}
+
+	// auto_approve_permissions answers here instead of asking the platform:
+	// Grok raises these requests for `deny` / `ask` rules that --always-approve
+	// deliberately leaves in place, so an unattended bot turn would otherwise
+	// wait for a human reply.
+	if s.cfg.autoApprovePermissions {
+		if optionID := pickAutoApproveOption(params.Options); optionID != "" {
+			slog.Info("grok acp: permission auto-approved", "tool", toolName, "option_id", optionID)
+			if err := s.writeFrame(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      frame.ID,
+				"result": map[string]any{
+					"outcome": map[string]any{"outcome": "selected", "optionId": optionID},
+				},
+			}); err != nil {
+				slog.Warn("grok acp: permission auto-approve reply failed", "error", err)
+			}
+			return
+		}
+		slog.Warn("grok acp: permission request offers no allow option; forwarding to the platform",
+			"tool", toolName)
+	}
+
 	s.permissionMu.Lock()
 	if s.pendingPermissions == nil {
 		s.pendingPermissions = make(map[string]pendingPermission)
@@ -391,10 +418,6 @@ func (s *acpSession) handlePermissionRequest(frame acpFrame) {
 	s.pendingPermissions[requestID] = pendingPermission{id: frame.ID, options: params.Options}
 	s.permissionMu.Unlock()
 
-	toolName := params.ToolCall.Title
-	if toolName == "" {
-		toolName = params.ToolCall.Kind
-	}
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,

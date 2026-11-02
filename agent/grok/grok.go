@@ -50,22 +50,25 @@ func init() {
 //   - "plan":              read-only; no always-approve
 //   - "dont_ask":          always-approve
 type Agent struct {
-	workDir         string
-	model           string
-	mode            string
-	cmd             string
-	backend         string
-	steerDelivery   string
-	steerHome       string
-	cliExtraArgs    []string
-	configEnv       []string
-	timeout         time.Duration
-	reasoningEffort string
-	maxTurns        int
-	providers       []core.ProviderConfig
-	activeIdx       int
-	sessionEnv      []string
-	mu              sync.RWMutex
+	workDir       string
+	model         string
+	mode          string
+	cmd           string
+	backend       string
+	steerDelivery string
+	steerHome     string
+	// autoApprovePermissions makes the ACP adapter answer permission requests
+	// itself instead of forwarding them to the platform.
+	autoApprovePermissions bool
+	cliExtraArgs           []string
+	configEnv              []string
+	timeout                time.Duration
+	reasoningEffort        string
+	maxTurns               int
+	providers              []core.ProviderConfig
+	activeIdx              int
+	sessionEnv             []string
+	mu                     sync.RWMutex
 
 	// catalogMu guards the cached model/effort catalog probed from the CLI, and
 	// probeMu serializes the probes themselves (they spawn processes and last up
@@ -98,6 +101,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	steerDelivery, _ := opts["steer_delivery"].(string)
 	steerDelivery = normalizeSteerDelivery(steerDelivery)
 	steerHome, _ := opts["steer_home"].(string)
+	autoApprovePermissions, _ := opts["auto_approve_permissions"].(bool)
 
 	maxTurns := intFromOpts(opts, "max_turns", 0)
 	timeoutMins := intFromOpts(opts, "timeout_mins", 0)
@@ -111,13 +115,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		mode:            mode,
-		cmd:             cmd,
-		backend:         backend,
-		steerDelivery:   steerDelivery,
-		steerHome:       strings.TrimSpace(steerHome),
+		workDir:       workDir,
+		model:         model,
+		mode:          mode,
+		cmd:           cmd,
+		backend:       backend,
+		steerDelivery: steerDelivery,
+		steerHome:     strings.TrimSpace(steerHome),
+
+		autoApprovePermissions: autoApprovePermissions,
+
 		cliExtraArgs:    extraArgs,
 		configEnv:       core.ParseConfigEnv(opts),
 		timeout:         timeout,
@@ -362,6 +369,7 @@ func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride, reas
 	backend := a.backend
 	steerDelivery := a.steerDelivery
 	steerHome := a.steerHome
+	autoApprovePermissions := a.autoApprovePermissions
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	timeout := a.timeout
@@ -406,6 +414,8 @@ func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride, reas
 			reasoningEffort: reasoning,
 			nativeSteer:     nativeSteer,
 			steerHome:       overlayHome,
+
+			autoApprovePermissions: autoApprovePermissions,
 		})
 	}
 
