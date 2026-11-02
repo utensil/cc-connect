@@ -146,3 +146,110 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// TestGrok_EngineSteerAndStop drives the two engine-level behaviours the ACP
+// transport exists for: a message sent while a turn runs must steer that turn
+// (queue.busy_behavior = "steer"), and /stop must keep the conversation instead
+// of reporting a session reset.
+//
+// Opt-in like the turn test above:
+//
+//	GROK_LOCAL_INTEGRATION=1 GROK_BIN=$HOME/.grok/bin/grok \
+//	  go test -tags=integration ./tests/integration -run TestGrok_EngineSteerAndStop -v
+func TestGrok_EngineSteerAndStop(t *testing.T) {
+	if os.Getenv("GROK_LOCAL_INTEGRATION") == "" {
+		t.Skip("set GROK_LOCAL_INTEGRATION=1 to run real Grok turns through the engine")
+	}
+	bin := os.Getenv("GROK_BIN")
+	if bin == "" {
+		bin = "grok"
+	}
+	if resolved, err := exec.LookPath(bin); err == nil {
+		bin = resolved
+	} else {
+		t.Skipf("grok CLI not found: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	agent, err := core.CreateAgent("grok", map[string]any{
+		"work_dir": projectDir,
+		"cmd":      bin,
+		"mode":     "yolo",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent(grok): %v", err)
+	}
+
+	mp := &mockPlatform{agent: agent}
+	e := core.NewEngine("test", agent, []core.Platform{mp}, filepath.Join(projectDir, "sessions.json"), core.LangEnglish)
+	defer e.Stop()
+	e.SetBusyMessageBehavior("steer")
+
+	sessionKey := "mock:channel-1:user1"
+	msg := func(content string) *core.Message {
+		return &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "mock",
+			UserID:     "user1",
+			UserName:   "testuser",
+			Content:    content,
+			ReplyCtx:   "ctx1",
+		}
+	}
+
+	// 1. Steering: the second message lands while the first turn is running and
+	//    must win, not queue behind it.
+	e.ReceiveMessage(mp, msg("Run `sleep 30; echo READY` with your bash tool, then reply with exactly: ALPHA"))
+	time.Sleep(12 * time.Second)
+	e.ReceiveMessage(mp, msg("Change of plan: reply with exactly: BANANA"))
+
+	// Grok delivers steering at its next safe gap (and holds it while the agent
+	// is blocked in a long tool call), so the check is that the guidance reached
+	// the agent and was acknowledged as steering, not that it preempted.
+	if _, ok := waitForMessageContaining(mp, "Guidance sent", 60*time.Second); !ok {
+		t.Fatalf("the follow-up was not acknowledged as a steer; sent: %v", mp.getSent())
+	}
+
+	steered, ok := waitForMessageContaining(mp, "BANANA", 240*time.Second)
+	if !ok {
+		t.Fatalf("steering did not reach the running turn; sent: %v", mp.getSent())
+	}
+	if strings.Contains(steered, "ALPHA") {
+		t.Fatalf("steered turn answered the original instruction: %q", steered)
+	}
+	for _, sent := range mp.getSent() {
+		if strings.Contains(sent, "session reset") {
+			t.Fatalf("/steer surfaced a session-reset error: %q", sent)
+		}
+	}
+	mp.clear()
+
+	// 2. /stop keeps the session: no reset error, and the next turn still has
+	//    the conversation.
+	e.ReceiveMessage(mp, msg("Remember the codeword PLUM. Reply with exactly: STORED"))
+	if _, ok := waitForMessageContaining(mp, "STORED", 180*time.Second); !ok {
+		t.Fatalf("priming turn produced no reply; sent: %v", mp.getSent())
+	}
+	mp.clear()
+
+	e.ReceiveMessage(mp, msg("Run `sleep 45; echo READY` with your bash tool, then reply with exactly: GAMMA"))
+	time.Sleep(12 * time.Second)
+	e.ReceiveMessage(mp, msg("/stop"))
+
+	if _, ok := waitForMessageContaining(mp, "Execution stopped", 60*time.Second); !ok {
+		t.Fatalf("/stop produced no confirmation; sent: %v", mp.getSent())
+	}
+	for _, sent := range mp.getSent() {
+		if strings.Contains(sent, "session reset") {
+			t.Fatalf("/stop still reports a session reset: %q", sent)
+		}
+	}
+	mp.clear()
+
+	e.ReceiveMessage(mp, msg("What was the codeword? Reply with only that word."))
+	recalled, ok := waitForMessageContaining(mp, "PLUM", 180*time.Second)
+	if !ok {
+		t.Fatalf("conversation was lost across /stop; sent: %v", mp.getSent())
+	}
+	t.Logf("after /stop → %q", firstLine(recalled))
+}

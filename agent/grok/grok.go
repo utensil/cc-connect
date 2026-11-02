@@ -33,21 +33,30 @@ func init() {
 	core.RegisterAgent("grok", New)
 }
 
-// Agent drives the official Grok Build CLI (https://x.ai/cli) in headless mode:
+// Agent drives the official Grok Build CLI (https://x.ai/cli).
 //
-//	grok -p <prompt> --output-format streaming-json [--resume <id>] ...
+// Two transports are available via `backend`:
 //
-// Modes map onto Grok's --permission-mode (+ --always-approve for non-plan):
-//   - "default":           permission-mode default + always-approve
-//   - "accept_edits":      permission-mode acceptEdits + always-approve
-//   - "yolo":              permission-mode bypassPermissions + always-approve
-//   - "plan":              permission-mode plan (read-only; no always-approve)
-//   - "dont_ask":          permission-mode dontAsk + always-approve
+//	backend = "acp" (default)     grok agent stdio — one persistent ACP
+//	                              session, native mid-turn steering, turn
+//	                              cancellation, live /model and /reasoning
+//	backend = "headless"          grok -p <prompt> --output-format
+//	                              streaming-json — one process per turn
+//
+// Modes map onto Grok's permission settings:
+//   - "default":           permission prompts forwarded to the platform
+//   - "accept_edits":      always-approve (headless: acceptEdits)
+//   - "yolo":              bypassPermissions / always-approve
+//   - "plan":              read-only; no always-approve
+//   - "dont_ask":          always-approve
 type Agent struct {
 	workDir         string
 	model           string
 	mode            string
 	cmd             string
+	backend         string
+	steerDelivery   string
+	steerHome       string
 	cliExtraArgs    []string
 	configEnv       []string
 	timeout         time.Duration
@@ -84,6 +93,12 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	reasoning = strings.TrimSpace(reasoning)
 
+	backend, _ := opts["backend"].(string)
+	backend = normalizeBackend(backend)
+	steerDelivery, _ := opts["steer_delivery"].(string)
+	steerDelivery = normalizeSteerDelivery(steerDelivery)
+	steerHome, _ := opts["steer_home"].(string)
+
 	maxTurns := intFromOpts(opts, "max_turns", 0)
 	timeoutMins := intFromOpts(opts, "timeout_mins", 0)
 	var timeout time.Duration
@@ -100,6 +115,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:           model,
 		mode:            mode,
 		cmd:             cmd,
+		backend:         backend,
+		steerDelivery:   steerDelivery,
+		steerHome:       strings.TrimSpace(steerHome),
 		cliExtraArgs:    extraArgs,
 		configEnv:       core.ParseConfigEnv(opts),
 		timeout:         timeout,
@@ -122,6 +140,34 @@ func intFromOpts(opts map[string]any, key string, def int) int {
 			slog.Debug("grok: option has unexpected type", "key", key, "type", fmt.Sprintf("%T", v))
 		}
 		return def
+	}
+}
+
+// normalizeBackend maps the `backend` option onto a transport name.
+func normalizeBackend(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "headless", "p", "cli":
+		return "headless"
+	case "", "acp", "stdio", "agent", "persistent":
+		return "acp"
+	default:
+		slog.Warn("grok: unknown backend, using acp", "backend", raw)
+		return "acp"
+	}
+}
+
+// normalizeSteerDelivery maps the `steer_delivery` option. "native" asks the
+// CLI to inject mid-turn follow-ups (see steerhome.go); "cancel" makes the
+// adapter cancel the running turn and continue with the guidance instead.
+func normalizeSteerDelivery(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "cancel", "interrupt", "restart":
+		return "cancel"
+	case "", "native", "steer", "auto":
+		return "native"
+	default:
+		slog.Warn("grok: unknown steer_delivery, using native", "steer_delivery", raw)
+		return "native"
 	}
 }
 
@@ -313,6 +359,9 @@ func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride, reas
 	model := a.effectiveModelLocked()
 	mode := a.mode
 	cmd := a.cmd
+	backend := a.backend
+	steerDelivery := a.steerDelivery
+	steerHome := a.steerHome
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	timeout := a.timeout
@@ -328,6 +377,36 @@ func (a *Agent) startSession(ctx context.Context, sessionID, modelOverride, reas
 	}
 	if r := strings.TrimSpace(reasoningOverride); r != "" {
 		reasoning = r
+	}
+
+	if backend == "acp" {
+		nativeSteer := steerDelivery == "native"
+		overlayHome := strings.TrimSpace(steerHome)
+		if nativeSteer && overlayHome == "" {
+			resolved, err := ensureSteerHome(resolveGrokHome(), "")
+			if err != nil {
+				slog.Warn("grok acp: cannot prepare the native-steer home; steering will cancel and continue instead", "error", err)
+				nativeSteer = false
+			} else {
+				overlayHome = resolved
+			}
+		}
+		if !nativeSteer {
+			overlayHome = ""
+		}
+		return newACPSession(ctx, acpConfig{
+			cmd:             cmd,
+			extraArgs:       extraArgs,
+			workDir:         workDir,
+			model:           model,
+			mode:            mode,
+			resumeID:        sessionID,
+			extraEnv:        extraEnv,
+			timeout:         timeout,
+			reasoningEffort: reasoning,
+			nativeSteer:     nativeSteer,
+			steerHome:       overlayHome,
+		})
 	}
 
 	return newGrokSession(ctx, sessionConfig{
