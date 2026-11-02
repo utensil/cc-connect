@@ -1940,6 +1940,11 @@ app_secret = "your-feishu-app-secret"
 # - model = model id from `grok models` (e.g. "grok-4.7"); leave empty to follow
 #   the CLI's own default, which is always the newest model
 # - reasoning_effort = xhigh|high|medium|low (model dependent)
+#   Applied at session open through ACP `session/set_config_option`, not just as
+#   a spawn flag: on grok 1.0.70 `--reasoning-effort` on `grok agent … stdio`
+#   does not change the session (nor does `-m`), so the adapter pushes the
+#   configured model and effort right after session/new or session/load. Grok's
+#   own subagents then inherit that effort instead of the account default.
 # - auto_approve_permissions = true|false (default false, acp backend)
 #   Answers a permission request inside the adapter instead of posting it to the
 #   platform. Needed for the requests Grok raises from Claude-compatible `deny`

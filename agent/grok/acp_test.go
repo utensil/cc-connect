@@ -39,15 +39,32 @@ type fakeACP struct {
 	raw     []fakeRequest
 	loadErr bool
 	closed  bool
+
+	// configOptions is what session/new and session/load report, so a test can
+	// model the CLI's current model/effort rows.
+	configOptions []map[string]any
+	// rejectBareConfig makes the fake answer -32602 to a bare
+	// session/set_config_option value, like a build that only takes the wrapped
+	// {"value": …} shape. The next attempt is accepted.
+	rejectBareConfig bool
 }
 
 func startFakeACP(t *testing.T, cfg acpConfig) (*acpSession, *fakeACP) {
+	return startFakeACPWith(t, cfg, nil)
+}
+
+// startFakeACPWith is startFakeACP plus a hook to shape the fake before the
+// handshake runs (session config options, scripted failures).
+func startFakeACPWith(t *testing.T, cfg acpConfig, customize func(*fakeACP)) (*acpSession, *fakeACP) {
 	t.Helper()
 
 	toAgent, toAgentW := io.Pipe()
 	fromAgent, fromAgentW := io.Pipe()
 
 	f := &fakeACP{t: t, reqs: make(chan fakeRequest, 64), w: fromAgentW}
+	if customize != nil {
+		customize(f)
+	}
 	go f.serve(toAgent)
 
 	if cfg.workDir == "" {
@@ -119,15 +136,27 @@ func (f *fakeACP) autoAnswer(req fakeRequest, loadErr bool) bool {
 		})
 	case "session/new":
 		f.result(req.ID, map[string]any{
-			"sessionId": testSessionID,
-			"models":    map[string]any{"currentModelId": "grok-4.7"},
+			"sessionId":     testSessionID,
+			"models":        map[string]any{"currentModelId": "grok-4.7"},
+			"configOptions": f.sessionConfigOptions(),
 		})
 	case "session/load":
 		if loadErr {
 			f.errorResp(req.ID, -32002, "session not found")
 			return true
 		}
-		f.result(req.ID, map[string]any{"sessionId": testSessionID})
+		f.result(req.ID, map[string]any{
+			"sessionId":     testSessionID,
+			"configOptions": f.sessionConfigOptions(),
+		})
+	case "session/set_config_option":
+		if _, wrapped := req.Params["value"].(map[string]any); !wrapped {
+			if f.takeRejectBareConfig() {
+				f.errorResp(req.ID, -32602, "Invalid params")
+				return true
+			}
+		}
+		f.result(req.ID, map[string]any{"configOptions": f.sessionConfigOptions()})
 	case "session/set_mode", "session/close":
 		f.result(req.ID, map[string]any{"configOptions": []any{}})
 	default:
@@ -246,6 +275,42 @@ func (f *fakeACP) expectNothing(window time.Duration) {
 		f.t.Fatalf("unexpected request %s", req.Method)
 	case <-time.After(window):
 	}
+}
+
+func (f *fakeACP) sessionConfigOptions() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.configOptions == nil {
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, len(f.configOptions))
+	copy(out, f.configOptions)
+	return out
+}
+
+// takeRejectBareConfig reports whether the next bare set_config_option value
+// must be rejected, and consumes the flag so the retry succeeds.
+func (f *fakeACP) takeRejectBareConfig() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.rejectBareConfig {
+		return false
+	}
+	f.rejectBareConfig = false
+	return true
+}
+
+// requests returns the recorded frames for one method, in arrival order.
+func (f *fakeACP) requests(method string) []fakeRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []fakeRequest
+	for _, req := range f.raw {
+		if req.Method == method {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 func (f *fakeACP) sawMethod(method string) bool {
@@ -503,22 +568,110 @@ func TestACPSession_CancelTurnKeepsSessionAlive(t *testing.T) {
 func TestACPSession_SetLiveModelAndEffort(t *testing.T) {
 	s, f := startFakeACP(t, acpConfig{mode: "yolo"})
 
-	modelDone := make(chan bool, 1)
-	go func() { modelDone <- s.SetLiveModel("grok-4.6") }()
-	req := f.expect("session/set_config_option")
-	assert.Equal(t, "model", req.Params["configId"])
-	value, ok := req.Params["value"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "grok-4.6", value["value"])
-	f.result(req.ID, map[string]any{"configOptions": []any{}})
-	assert.True(t, <-modelDone)
+	require.True(t, s.SetLiveModel("grok-4.6"))
+	require.True(t, s.SetLiveReasoningEffort("xhigh"))
 
-	effortDone := make(chan bool, 1)
-	go func() { effortDone <- s.SetLiveReasoningEffort("xhigh") }()
-	req = f.expect("session/set_config_option")
-	assert.Equal(t, "reasoning_effort", req.Params["configId"])
-	f.result(req.ID, map[string]any{"configOptions": []any{}})
-	assert.True(t, <-effortDone)
+	// Grok's SessionConfigOptionValue takes the bare value; the {"value": …}
+	// wrapper is rejected with -32602 on 1.0.70.
+	sent := f.requests("session/set_config_option")
+	require.Len(t, sent, 2)
+	assert.Equal(t, "model", sent[0].Params["configId"])
+	assert.Equal(t, "grok-4.6", sent[0].Params["value"])
+	assert.Equal(t, "reasoning_effort", sent[1].Params["configId"])
+	assert.Equal(t, "xhigh", sent[1].Params["value"])
+}
+
+// testSessionRuntime reads the model/effort the session will actually use; the
+// ACP session keeps them private (the Agent holds the public getters).
+func testSessionRuntime(s *acpSession) (string, string) {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	return s.model, s.reasoningEffort
+}
+
+func TestACPSession_AppliesSpawnModelAndEffort(t *testing.T) {
+	// The agent's spawn flags do not change the session runtime, and session/new
+	// reports the defaults, so a pinned model/effort has to be pushed.
+	s, f := startFakeACPWith(t, acpConfig{
+		mode:            "yolo",
+		model:           "grok-4.6",
+		reasoningEffort: "high",
+	}, func(f *fakeACP) {
+		f.configOptions = []map[string]any{
+			{"id": "model", "currentValue": "grok-4.7"},
+			{"id": "reasoning_effort", "currentValue": "max"},
+		}
+	})
+
+	sent := f.requests("session/set_config_option")
+	require.Len(t, sent, 2, "model and effort must both be applied at spawn")
+
+	values := map[string]any{}
+	for _, req := range sent {
+		id, _ := req.Params["configId"].(string)
+		values[id] = req.Params["value"]
+	}
+	assert.Equal(t, "grok-4.6", values["model"])
+	assert.Equal(t, "high", values["reasoning_effort"])
+
+	model, effort := testSessionRuntime(s)
+	assert.Equal(t, "grok-4.6", model)
+	assert.Equal(t, "high", effort)
+}
+
+func TestACPSession_AppliesSpawnRuntimeOnResume(t *testing.T) {
+	s, f := startFakeACPWith(t, acpConfig{
+		mode:            "yolo",
+		resumeID:        "sess-existing",
+		reasoningEffort: "high",
+	}, func(f *fakeACP) {
+		// The stored session was created under a different effort.
+		f.configOptions = []map[string]any{{"id": "reasoning_effort", "currentValue": "low"}}
+	})
+
+	sent := f.requests("session/set_config_option")
+	require.Len(t, sent, 1)
+	assert.Equal(t, "reasoning_effort", sent[0].Params["configId"])
+	assert.Equal(t, "high", sent[0].Params["value"])
+	_, effort := testSessionRuntime(s)
+	assert.Equal(t, "high", effort)
+}
+
+func TestACPSession_SpawnRuntimeSkipsMatchingValues(t *testing.T) {
+	_, f := startFakeACPWith(t, acpConfig{
+		mode:            "yolo",
+		model:           "grok-4.7",
+		reasoningEffort: "high",
+	}, func(f *fakeACP) {
+		f.configOptions = []map[string]any{
+			{"id": "model", "currentValue": "grok-4.7"},
+			{"id": "reasoning_effort", "currentValue": "high"},
+		}
+	})
+
+	assert.Empty(t, f.requests("session/set_config_option"),
+		"a session already running the configured values must not be re-programmed")
+}
+
+func TestACPSession_SetConfigOptionFallsBackToWrappedValue(t *testing.T) {
+	s, f := startFakeACPWith(t, acpConfig{
+		mode:            "yolo",
+		reasoningEffort: "high",
+	}, func(f *fakeACP) {
+		f.configOptions = []map[string]any{{"id": "reasoning_effort", "currentValue": "max"}}
+		f.rejectBareConfig = true
+	})
+
+	// The bare value is rejected, the wrapped retry is accepted, and the session
+	// comes up with the configured effort instead of failing to start.
+	sent := f.requests("session/set_config_option")
+	require.Len(t, sent, 2)
+	assert.Equal(t, "high", sent[0].Params["value"])
+	wrapped, ok := sent[1].Params["value"].(map[string]any)
+	require.True(t, ok, "fallback must use the wrapped shape, got %v", sent[1].Params["value"])
+	assert.Equal(t, "high", wrapped["value"])
+	_, effort := testSessionRuntime(s)
+	assert.Equal(t, "high", effort)
 }
 
 func TestACPSession_CloseIsIdempotent(t *testing.T) {

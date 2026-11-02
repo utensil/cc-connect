@@ -466,7 +466,23 @@ agent worked was queued until the turn ended and `/stop` killed the process.
   session — /stop must guarantee a stop, and the stored session id still
   resumes the conversation on the next message.
 - Live switching: `SetLiveModel` / `SetLiveReasoningEffort` use
-  `session/set_config_option` with `configId` `model` / `reasoning_effort`.
+  `session/set_config_option` with `configId` `model` / `reasoning_effort`. The
+  value is sent **bare** (`"value": "low"`): grok 1.0.70's
+  `SessionConfigOptionValue` is an untagged enum and rejects the
+  `{"value": …}` wrapper with `-32602 Invalid params`, which is why the wrapper
+  is kept only as a fallback for builds that expect it.
+- Spawn-time model/effort: the `-m` and `--reasoning-effort` flags on
+  `grok agent stdio` do **not** change the session runtime on 1.0.70 — a child
+  spawned with `-m grok-4.6` opens and runs `grok-4.7`, and
+  `--reasoning-effort low|minimal|xhigh` all run at the account default (each
+  probe's `chat_history.jsonl` records the effort actually used). ACP exposes
+  both as session config options, so after `session/new` **and** `session/load`
+  the adapter pushes the configured `model` / `reasoning_effort` through
+  `session/set_config_option`, skipping values the session already runs at and
+  logging `grok acp: spawn runtime applied` (`… not applied` if the agent
+  refuses). That is what makes a configured default real, and what lets grok's
+  own subagents inherit the configured effort instead of the account default.
+  The flags stay on the command line as no-ops for builds that honour them.
 - Permissions: with `mode = "yolo"` (or `accept_edits` / `dont_ask`) the child
   runs with `--always-approve` plus `_meta.yoloMode`. Otherwise
   `session/request_permission` is surfaced as `core.EventPermissionRequest` and
