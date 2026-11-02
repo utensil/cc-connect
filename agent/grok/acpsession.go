@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,11 @@ func newACPSession(ctx context.Context, cfg acpConfig) (*acpSession, error) {
 	if cfg.workDir == "" {
 		cfg.workDir = "."
 	}
+	// ACP locates a stored session by its session folder, which Grok keys off
+	// the *resolved* cwd: handing it `/tmp/x` on macOS, where the real path is
+	// `/private/tmp/x`, makes `session/load` fail with "Path not found" and the
+	// adapter would silently start a fresh session instead of resuming.
+	cfg.workDir = canonicalWorkDir(cfg.workDir)
 
 	args := append([]string{}, cfg.extraArgs...)
 	args = append(args, "agent")
@@ -159,6 +165,10 @@ func newACPSession(ctx context.Context, cfg acpConfig) (*acpSession, error) {
 // newACPSessionWithStream builds a session over an already-connected transport
 // and runs the handshake. Tests use it directly with pipes.
 func newACPSessionWithStream(parent context.Context, cfg acpConfig, stdin io.WriteCloser, stdout io.ReadCloser) (*acpSession, error) {
+	if cfg.workDir == "" {
+		cfg.workDir = "."
+	}
+	cfg.workDir = canonicalWorkDir(cfg.workDir)
 	sessionCtx, cancel := context.WithCancel(parent)
 	s := &acpSession{
 		cfg:                cfg,
@@ -209,6 +219,17 @@ func (b *acpStderrBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return strings.TrimSpace(string(b.buf))
+}
+
+// canonicalWorkDir resolves symlinks so session/load and session/new agree on
+// the folder Grok stores sessions under. A missing directory is returned as is;
+// the CLI reports the real error.
+func canonicalWorkDir(dir string) string {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil || resolved == "" {
+		return dir
+	}
+	return resolved
 }
 
 func (s *acpSession) handshake() error {

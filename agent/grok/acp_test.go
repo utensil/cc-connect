@@ -704,3 +704,46 @@ func TestACPSession_SteerFallbackEmitsOneTerminalResultEvenWhenPrimarySettlesLat
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+func TestACPSession_ResolvesSymlinkedWorkDir(t *testing.T) {
+	real := t.TempDir()
+	linkParent := t.TempDir()
+	link := filepath.Join(linkParent, "workdir-link")
+	require.NoError(t, os.Symlink(real, link))
+
+	resolved, err := filepath.EvalSymlinks(link)
+	require.NoError(t, err)
+
+	toAgent, toAgentW := io.Pipe()
+	fromAgent, fromAgentW := io.Pipe()
+	f := &fakeACP{t: t, reqs: make(chan fakeRequest, 64), w: fromAgentW}
+	go f.serve(toAgent)
+
+	s, err := newACPSessionWithStream(context.Background(), acpConfig{
+		mode:    "yolo",
+		workDir: link,
+	}, toAgentW, fromAgent)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = s.Close()
+		_ = toAgentW.Close()
+		_ = fromAgentW.Close()
+		f.stop()
+	})
+
+	// ACP keys sessions off the resolved cwd, so a symlinked work_dir must be
+	// canonicalised or session/load fails with "Path not found".
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var sawNew bool
+	for _, req := range f.raw {
+		if req.Method != "session/new" {
+			continue
+		}
+		sawNew = true
+		if got, _ := req.Params["cwd"].(string); got != resolved {
+			t.Fatalf("session/new cwd = %q, want resolved %q", got, resolved)
+		}
+	}
+	assert.True(t, sawNew)
+}
