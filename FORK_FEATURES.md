@@ -428,7 +428,11 @@ agent worked was queued until the turn ended and `/stop` killed the process.
   notifications map onto `core.Event` (`agent_message_chunk`, `agent_thought_chunk`,
   `tool_call`, `tool_call_update`, `usage_update`); updates that arrive before
   the first prompt are the `session/load` transcript replay and are dropped so
-  restarting the daemon does not re-post old answers.
+  restarting the daemon does not re-post old answers. The work dir is
+  canonicalised (`EvalSymlinks`) before `session/new` / `session/load`, because
+  Grok keys its session store off the resolved cwd and a symlinked path makes
+  the load fail with `Path not found`, which would silently start a fresh
+  session on the first message after an upgrade.
 - Steering (`SessionSteerer`): `Steer` writes a second `session/prompt`. Grok
   injects a mid-turn prompt into the running turn only when its own
   `[ui] follow_up_behavior = "steer"`; the default `"queue"` would silently
