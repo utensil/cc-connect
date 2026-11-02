@@ -938,10 +938,19 @@ type zulipStreamingCard struct {
 	platform    *Platform
 	replyCtx    replyContext
 	mu          sync.Mutex
-	messageID   int64  // 0 until first Update() posts the initial message
-	lastContent string // dedup: skip PATCHes that would send identical content
+	messageID   int64     // 0 until first Update() posts the initial message
+	lastContent string    // dedup: skip PATCHes that would send identical content
+	lastUpdate  time.Time // last successful POST/PATCH, for the throttle window
 	failed      bool
 }
+
+// cardUpdateMinInterval coalesces streaming-card PATCHes. The engine updates the
+// card on every streamed chunk, i.e. per token, and a per-token edit stream
+// makes the message unreadable in a Zulip client and hammers the realm with
+// PATCH requests for no information gain. Slack's implementation uses the same
+// 3 s guidance for its own rate limits; Finalize is exempt so the last edit
+// always lands.
+const cardUpdateMinInterval = 3 * time.Second
 
 func (c *zulipStreamingCard) sendInitial(ctx context.Context, content string) (int64, error) {
 	switch c.replyCtx.kind {
@@ -955,14 +964,33 @@ func (c *zulipStreamingCard) sendInitial(ctx context.Context, content string) (i
 }
 
 // Update replaces the card body with `content`. First call POSTs a new
-// message; subsequent calls PATCH it.
+// message; subsequent calls PATCH it, at most once per cardUpdateMinInterval.
 func (c *zulipStreamingCard) Update(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.update(ctx, content, true)
+}
+
+// Finalize renders the final content. Zulip has no separate "final" concept, so
+// this is a last Update — except that it ignores the throttle: the final body
+// must land even when the turn settles inside the current window (and it posts
+// the card when nothing was sent yet).
+func (c *zulipStreamingCard) Finalize(ctx context.Context, content string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.update(ctx, content, false)
+}
+
+// update posts or PATCHes the card body. Must hold c.mu.
+func (c *zulipStreamingCard) update(ctx context.Context, content string, throttle bool) error {
 	if c.failed {
 		return errors.New("zulip streaming card: previously failed")
 	}
 	if content == "" || content == c.lastContent {
+		return nil
+	}
+	if throttle && c.messageID != 0 && time.Since(c.lastUpdate) < cardUpdateMinInterval {
+		// Coalesced: the next tick (or Finalize) carries the newer body.
 		return nil
 	}
 	if c.messageID == 0 {
@@ -979,13 +1007,8 @@ func (c *zulipStreamingCard) Update(ctx context.Context, content string) error {
 		}
 	}
 	c.lastContent = content
+	c.lastUpdate = time.Now()
 	return nil
-}
-
-// Finalize renders the final content. Zulip has no separate "final" concept,
-// so this is just a last Update.
-func (c *zulipStreamingCard) Finalize(ctx context.Context, content string) error {
-	return c.Update(ctx, content)
 }
 
 // Failed reports whether an earlier Update returned an error; the engine
