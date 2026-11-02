@@ -14,8 +14,9 @@ import (
 const acpInitializeFrame = `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"id":"grok.com","name":"Grok","description":"Sign in with Grok"}],"_meta":{"modelState":{"currentModelId":"grok-4.6","availableModels":[{"modelId":"grok-4.6","name":"Grok 4.6","description":"SpaceXAI's latest frontier model","_meta":{"totalContextTokens":500000,"agentType":"grok-build-plan","supportsReasoningEffort":true,"reasoningEffort":"high","reasoningEfforts":[{"id":"xhigh","value":"xhigh","label":"Extra High Effort","default":false},{"id":"high","value":"high","label":"High Effort","default":true},{"id":"medium","value":"medium","label":"Medium Effort","default":false},{"id":"low","value":"low","label":"Low Effort","default":false}]}},{"modelId":"grok-4.5","name":"Grok 4.5","_meta":{"totalContextTokens":500000,"supportsReasoningEffort":true,"reasoningEffort":"high","reasoningEfforts":[{"id":"high","value":"high","default":true},{"id":"medium","value":"medium","default":false},{"id":"low","value":"low","default":false}]}}]}}}}`
 
 func TestModelsFromACPFrame(t *testing.T) {
-	models := modelsFromACPFrame([]byte(acpInitializeFrame))
+	models, defaultID := modelsFromACPFrame([]byte(acpInitializeFrame))
 	require.Len(t, models, 2)
+	assert.Equal(t, "grok-4.6", defaultID)
 
 	assert.Equal(t, "grok-4.6", models[0].ID)
 	assert.Equal(t, "Grok 4.6", models[0].Name)
@@ -30,9 +31,15 @@ func TestModelsFromACPFrame(t *testing.T) {
 }
 
 func TestModelsFromACPFrame_NonResultFrames(t *testing.T) {
-	assert.Nil(t, modelsFromACPFrame([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{}}`)))
-	assert.Nil(t, modelsFromACPFrame([]byte(`not json`)))
-	assert.Nil(t, modelsFromACPFrame([]byte(`{"result":{}}`)))
+	for _, frame := range []string{
+		`{"jsonrpc":"2.0","method":"session/update","params":{}}`,
+		`not json`,
+		`{"result":{}}`,
+	} {
+		models, defaultID := modelsFromACPFrame([]byte(frame))
+		assert.Nil(t, models, frame)
+		assert.Empty(t, defaultID, frame)
+	}
 }
 
 func TestParseModelsText(t *testing.T) {
@@ -44,8 +51,9 @@ Available models:
   * grok-4.6 (default)
   - grok-4.5
 `
-	models := parseModelsText(out)
+	models, defaultID := parseModelsText(out)
 	require.Len(t, models, 2)
+	assert.Equal(t, "grok-4.6", defaultID)
 	assert.Equal(t, "grok-4.6", models[0].ID)
 	assert.Equal(t, "(default)", models[0].Description)
 	assert.Equal(t, "grok-4.5", models[1].ID)
@@ -53,8 +61,10 @@ Available models:
 
 func TestStaticModelsAndFallbackEfforts(t *testing.T) {
 	opts := staticModels(fallbackModels)
-	require.Len(t, opts, 2)
-	assert.Equal(t, "grok-4.6", opts[0].Name)
+	require.NotEmpty(t, opts)
+	// The fallback list is newest-first, so the fallback default is the latest
+	// model rather than a pinned version.
+	assert.Equal(t, "grok-4.7", opts[0].Name)
 	assert.Equal(t, "default", opts[0].Desc)
 
 	// An empty catalog falls back to the conservative effort union.
@@ -62,16 +72,22 @@ func TestStaticModelsAndFallbackEfforts(t *testing.T) {
 	assert.Equal(t, fallbackEfforts, a.modelEffortsLocked())
 
 	// A populated catalog reports the union in catalog order, deduplicated.
-	a.catalogCache = modelsFromACPFrame([]byte(acpInitializeFrame))
+	a.catalogCache, _ = modelsFromACPFrame([]byte(acpInitializeFrame))
 	assert.Equal(t, []string{"xhigh", "high", "medium", "low"}, a.modelEffortsLocked())
 	assert.Equal(t, []string{"high", "medium", "low"}, a.effortsForModel("grok-4.5"))
 	assert.Equal(t, "grok-4.6", a.effectiveModelLocked())
+
+	// With nothing pinned, GetModel reports the CLI's own default from the cache.
+	a2 := &Agent{activeIdx: -1}
+	assert.Equal(t, "", a2.GetModel(), "no cache → nothing to report, not a guess")
+	a2.catalogCache, a2.catalogDefault = modelsFromACPFrame([]byte(acpInitializeFrame))
+	assert.Equal(t, "grok-4.6", a2.GetModel())
 }
 
 func TestValidateSessionRuntime(t *testing.T) {
 	a := &Agent{cmd: "grok", activeIdx: -1}
 	a.catalogMu.Lock()
-	a.catalogCache = modelsFromACPFrame([]byte(acpInitializeFrame))
+	a.catalogCache, _ = modelsFromACPFrame([]byte(acpInitializeFrame))
 	a.catalogAt = testNow()
 	a.catalogMu.Unlock()
 

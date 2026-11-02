@@ -37,9 +37,12 @@ const catalogTTL = 10 * time.Minute
 const catalogProbeTimeout = 6 * time.Second
 
 // fallbackModels is used when both probes fail (for example a missing or broken
-// CLI): it matches the stock Grok Build catalog at the time of writing.
+// CLI): it matches the stock Grok Build catalog at the time of writing, newest
+// first, so the fallback default is the latest model rather than a pinned one.
 var fallbackModels = []catalogModel{
-	{ID: "grok-4.6", Name: "Grok 4.6", Description: "default", DefaultEffort: "high",
+	{ID: "grok-4.7", Name: "Grok 4.7", Description: "default", DefaultEffort: "high",
+		Efforts: []string{"xhigh", "high", "medium", "low"}, ContextTokens: 256000},
+	{ID: "grok-4.6", Name: "Grok 4.6", DefaultEffort: "high",
 		Efforts: []string{"xhigh", "high", "medium", "low"}, ContextTokens: 500000},
 	{ID: "grok-4.5", Name: "Grok 4.5", DefaultEffort: "high",
 		Efforts: []string{"high", "medium", "low"}, ContextTokens: 500000},
@@ -77,9 +80,9 @@ func (a *Agent) catalog(ctx context.Context) []catalogModel {
 	cmdName := a.cmd
 	a.mu.RUnlock()
 
-	models := probeCatalogACP(ctx, cmdName)
+	models, defaultID := probeCatalogACP(ctx, cmdName)
 	if len(models) == 0 {
-		models = probeCatalogText(ctx, cmdName)
+		models, defaultID = probeCatalogText(ctx, cmdName)
 	}
 	if len(models) == 0 {
 		// Keep a previous good result rather than degrading to the static list.
@@ -87,6 +90,7 @@ func (a *Agent) catalog(ctx context.Context) []catalogModel {
 	}
 	a.catalogMu.Lock()
 	a.catalogCache = models
+	a.catalogDefault = defaultID
 	a.catalogAt = time.Now()
 	a.catalogMu.Unlock()
 	return models
@@ -95,9 +99,9 @@ func (a *Agent) catalog(ctx context.Context) []catalogModel {
 // probeCatalogACP runs the ACP `initialize` handshake of `grok agent stdio` and
 // reads `_meta.modelState`. It needs no authentication, so /model can list the
 // real catalog before the operator has ever run `grok login`.
-func probeCatalogACP(ctx context.Context, cmdName string) []catalogModel {
+func probeCatalogACP(ctx context.Context, cmdName string) ([]catalogModel, string) {
 	if cmdName == "" {
-		return nil
+		return nil, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, catalogProbeTimeout)
 	defer cancel()
@@ -106,15 +110,15 @@ func probeCatalogACP(ctx context.Context, cmdName string) []catalogModel {
 	cmd.WaitDelay = time.Second
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	if err := cmd.Start(); err != nil {
 		slog.Debug("grok: catalog probe failed to start", "error", err)
-		return nil
+		return nil, ""
 	}
 	defer func() {
 		_ = stdin.Close()
@@ -137,11 +141,11 @@ func probeCatalogACP(ctx context.Context, cmdName string) []catalogModel {
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	if _, err := stdin.Write(append(payload, '\n')); err != nil {
 		slog.Debug("grok: catalog probe write failed", "error", err)
-		return nil
+		return nil, ""
 	}
 
 	scanner := bufio.NewScanner(stdout)
@@ -151,17 +155,17 @@ func probeCatalogACP(ctx context.Context, cmdName string) []catalogModel {
 		if line == "" || !strings.HasPrefix(line, "{") {
 			continue
 		}
-		if models := modelsFromACPFrame([]byte(line)); len(models) > 0 {
-			return models
+		if models, defaultID := modelsFromACPFrame([]byte(line)); len(models) > 0 {
+			return models, defaultID
 		}
 	}
 	slog.Debug("grok: catalog probe returned no modelState")
-	return nil
+	return nil, ""
 }
 
 // modelsFromACPFrame decodes one ACP JSON-RPC frame and, when it is the
 // `initialize` result, returns the model catalog from `_meta.modelState`.
-func modelsFromACPFrame(data []byte) []catalogModel {
+func modelsFromACPFrame(data []byte) ([]catalogModel, string) {
 	var frame struct {
 		Result *struct {
 			Meta struct {
@@ -187,10 +191,10 @@ func modelsFromACPFrame(data []byte) []catalogModel {
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(data, &frame); err != nil {
-		return nil
+		return nil, ""
 	}
 	if frame.Result == nil || frame.Result.Meta.ModelState == nil {
-		return nil
+		return nil, ""
 	}
 	state := frame.Result.Meta.ModelState
 	models := make([]catalogModel, 0, len(state.AvailableModels))
@@ -223,20 +227,20 @@ func modelsFromACPFrame(data []byte) []catalogModel {
 		}
 		models = append(models, entry)
 	}
-	return models
+	return models, state.CurrentModelID
 }
 
 // probeCatalogText falls back to `grok models`, which prints ids only.
-func probeCatalogText(ctx context.Context, cmdName string) []catalogModel {
+func probeCatalogText(ctx context.Context, cmdName string) ([]catalogModel, string) {
 	if cmdName == "" {
-		return nil
+		return nil, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, catalogProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(cctx, cmdName, "models").CombinedOutput()
 	if err != nil {
 		slog.Debug("grok: models probe failed", "error", err)
-		return nil
+		return nil, ""
 	}
 	return parseModelsText(string(out))
 }
@@ -248,13 +252,20 @@ func probeCatalogText(ctx context.Context, cmdName string) []catalogModel {
 //	Available models:
 //	  * grok-4.6 (default)
 //	  - grok-4.5
-func parseModelsText(out string) []catalogModel {
+func parseModelsText(out string) ([]catalogModel, string) {
 	var models []catalogModel
+	defaultID := ""
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(strings.ToLower(line), "default model") ||
-			strings.HasPrefix(strings.ToLower(line), "available models") ||
-			strings.HasPrefix(line, "You are not authenticated") {
+		if lower := strings.ToLower(line); strings.HasPrefix(lower, "default model") {
+			if i := strings.Index(line, ":"); i >= 0 {
+				defaultID = strings.TrimSpace(line[i+1:])
+			}
+			continue
+		}
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "available models") ||
+			strings.HasPrefix(line, "You are not authenticated") ||
+			strings.HasPrefix(strings.ToLower(line), "you are logged in") {
 			continue
 		}
 		line = strings.TrimSpace(strings.TrimPrefix(line, "*"))
@@ -270,7 +281,10 @@ func parseModelsText(out string) []catalogModel {
 		}
 		models = append(models, catalogModel{ID: name, Description: desc})
 	}
-	return models
+	if defaultID == "" && len(models) > 0 {
+		defaultID = models[0].ID
+	}
+	return models, defaultID
 }
 
 // staticModels converts catalogModel entries into core model options.
@@ -318,6 +332,21 @@ func (a *Agent) effortsForModel(model string) []string {
 		}
 	}
 	return a.modelEffortsLocked()
+}
+
+// defaultModelID returns the model the CLI itself would use, from the cached
+// catalog only (never probes), so GetModel can stay informative and non-blocking
+// when no model is pinned in config.
+func (a *Agent) defaultModelID() string {
+	a.catalogMu.Lock()
+	defer a.catalogMu.Unlock()
+	if a.catalogDefault != "" {
+		return a.catalogDefault
+	}
+	if len(a.catalogCache) > 0 {
+		return a.catalogCache[0].ID
+	}
+	return ""
 }
 
 // effectiveModelLocked resolves the model a turn runs with, honouring an active

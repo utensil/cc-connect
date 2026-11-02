@@ -1914,7 +1914,8 @@ app_secret = "your-feishu-app-secret"
 # - mode = "default"|"accept_edits"|"yolo"|"plan"|"dont_ask"
 #   Headless turns cannot answer permission prompts, so every mode except
 #   `plan` runs with --always-approve. / 除 plan 外的模式都会自动批准。
-# - model = model id from `grok models` (e.g. "grok-4.6"); empty → CLI default
+# - model = model id from `grok models` (e.g. "grok-4.7"); leave empty to follow
+#   the CLI's own default, which is always the newest model
 # - reasoning_effort = xhigh|high|medium|low (model dependent)
 # - max_turns = optional agent turn ceiling per prompt
 # - timeout_mins = optional per-turn timeout
@@ -1929,7 +1930,7 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/project"
 # cmd = "/Users/you/.grok/bin/grok"
 # mode = "yolo"
-# model = "grok-4.6"
+# model = ""                  # empty → newest model the CLI defaults to / 留空则用 CLI 默认最新模型
 # reasoning_effort = "high"
 # # max_turns = 40
 # # timeout_mins = 30

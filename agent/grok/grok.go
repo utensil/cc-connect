@@ -61,10 +61,11 @@ type Agent struct {
 	// catalogMu guards the cached model/effort catalog probed from the CLI, and
 	// probeMu serializes the probes themselves (they spawn processes and last up
 	// to two 6s timeouts, so neither lock may be held across a probe).
-	catalogMu    sync.Mutex
-	probeMu      sync.Mutex
-	catalogCache []catalogModel
-	catalogAt    time.Time
+	catalogMu      sync.Mutex
+	probeMu        sync.Mutex
+	catalogCache   []catalogModel
+	catalogDefault string
+	catalogAt      time.Time
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -179,10 +180,17 @@ func (a *Agent) SetModel(model string) {
 	slog.Info("grok: model changed", "model", model)
 }
 
+// GetModel reports the model a turn will use. When no model is pinned the CLI
+// picks its own default (the newest model), so report that from the cached
+// catalog instead of an empty string.
 func (a *Agent) GetModel() string {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+	model := core.GetProviderModel(a.providers, a.activeIdx, a.model)
+	a.mu.Unlock()
+	if model != "" {
+		return model
+	}
+	return a.defaultModelID()
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {

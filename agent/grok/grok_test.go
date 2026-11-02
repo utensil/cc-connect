@@ -40,7 +40,7 @@ func TestPermissionModeFlag(t *testing.T) {
 }
 
 func TestGrokSessionSlug(t *testing.T) {
-	assert.Equal(t, "%2FUsers%2Fliyang", grokSessionSlug("/Users/liyang"))
+	assert.Equal(t, "%2FUsers%2Ftester", grokSessionSlug("/Users/tester"))
 	assert.Equal(t, "%2Ftmp", grokSessionSlug("/tmp"))
 }
 
@@ -52,7 +52,7 @@ func TestParseGrokSessionDir(t *testing.T) {
 	summary := map[string]any{
 		"info": map[string]any{
 			"id":  "019f-test",
-			"cwd": "/Users/liyang/project",
+			"cwd": "/Users/tester/project",
 		},
 		"session_summary":   "Fix the flaky test",
 		"num_chat_messages": 12,
@@ -63,7 +63,7 @@ func TestParseGrokSessionDir(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), data, 0o644))
 
-	info := parseGrokSessionDir(sessionDir, "/Users/liyang/project")
+	info := parseGrokSessionDir(sessionDir, "/Users/tester/project")
 	require.NotNil(t, info)
 	assert.Equal(t, "019f-test", info.ID)
 	assert.Equal(t, "Fix the flaky test", info.Summary)
