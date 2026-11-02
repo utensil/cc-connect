@@ -25,6 +25,7 @@ type fakeRequest struct {
 	ID     json.RawMessage
 	Method string
 	Params map[string]any
+	Result map[string]any
 }
 
 // fakeACP is a scripted ACP agent behind a pair of pipes. Handshake methods are
@@ -81,11 +82,12 @@ func (f *fakeACP) serve(r io.Reader) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params map[string]any  `json:"params"`
+			Result map[string]any  `json:"result"`
 		}
 		if err := json.Unmarshal([]byte(line), &frame); err != nil {
 			continue
 		}
-		req := fakeRequest{ID: frame.ID, Method: frame.Method, Params: frame.Params}
+		req := fakeRequest{ID: frame.ID, Method: frame.Method, Params: frame.Params, Result: frame.Result}
 		f.mu.Lock()
 		f.raw = append(f.raw, req)
 		loadErr := f.loadErr
@@ -547,6 +549,49 @@ func TestACPSession_PermissionRequestRoundTrip(t *testing.T) {
 	require.NoError(t, s.RespondPermission(evt.RequestID, core.PermissionResult{Behavior: "allow"}))
 }
 
+func TestACPSession_AutoApprovePermissionRequest(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", autoApprovePermissions: true})
+
+	require.NoError(t, s.Send("find the env file", nil, nil))
+	f.expect("session/prompt")
+
+	f.requestPermission(900, []map[string]any{
+		{"optionId": "always-allow", "name": "Always allow", "kind": "allow_always"},
+		{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+		{"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+	})
+
+	// The reply is the adapter's own: it grants the session-wide allow and never
+	// surfaces the prompt as an event.
+	reply := f.expect("")
+	outcome, _ := reply.Result["outcome"].(map[string]any)
+	require.NotNilf(t, outcome, "expected an outcome in %v", reply.Result)
+	assert.Equal(t, "selected", outcome["outcome"])
+	assert.Equal(t, "always-allow", outcome["optionId"])
+
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("auto-approved request must not surface, got event %v", evt.Type)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestACPSession_AutoApproveFallsBackWithoutAllowOption(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", autoApprovePermissions: true})
+
+	require.NoError(t, s.Send("touch a file", nil, nil))
+	f.expect("session/prompt")
+
+	f.requestPermission(901, []map[string]any{
+		{"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+	})
+
+	// Nothing to grant: the platform still owns the decision.
+	evt := <-s.Events()
+	require.Equal(t, core.EventPermissionRequest, evt.Type)
+	require.NoError(t, s.RespondPermission(evt.RequestID, core.PermissionResult{Behavior: "deny"}))
+}
+
 func TestPickPermissionOption(t *testing.T) {
 	options := []acpPermissionOption{
 		{OptionID: "a", Name: "Allow once", Kind: "allow_once"},
@@ -560,6 +605,26 @@ func TestPickPermissionOption(t *testing.T) {
 	assert.Equal(t, "yes", pickPermissionOption([]acpPermissionOption{
 		{OptionID: "yes", Name: "Yes, allow"},
 	}, true))
+}
+
+func TestPickAutoApproveOption(t *testing.T) {
+	// The session-wide grant wins even when the once-only option comes first.
+	assert.Equal(t, "always-allow", pickAutoApproveOption([]acpPermissionOption{
+		{OptionID: "allow-once", Name: "Allow once", Kind: "allow_once"},
+		{OptionID: "always-allow", Name: "Always allow", Kind: "allow_always"},
+		{OptionID: "reject-once", Name: "Reject", Kind: "reject_once"},
+	}))
+
+	// Hyphenated ids from the real CLI, with kinds it does not map onto ours.
+	assert.Equal(t, "always-allow", pickAutoApproveOption([]acpPermissionOption{
+		{OptionID: "allow-once", Name: "Allow once"},
+		{OptionID: "always-allow", Name: "Always allow"},
+	}))
+
+	// Nothing grantable.
+	assert.Equal(t, "", pickAutoApproveOption([]acpPermissionOption{
+		{OptionID: "reject-once", Name: "Reject", Kind: "reject_once"},
+	}))
 }
 
 func TestACPSession_SendRejectsClosedSession(t *testing.T) {

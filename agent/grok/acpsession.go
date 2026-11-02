@@ -39,6 +39,13 @@ type acpConfig struct {
 	// steerHome, when non-empty, is exported as GROK_HOME for the child so the
 	// CLI runs with the mid-turn steering setting cc-connect configured.
 	steerHome string
+	// autoApprovePermissions answers permission requests inside the adapter with
+	// the most permissive option instead of forwarding them to the platform.
+	// --always-approve cannot cover the requests Grok raises for
+	// Claude-compatible `deny` rules (for example a global `Read(.env)` deny in
+	// ~/.claude/settings.json), so without this a bot turn can block on a human
+	// reply even in yolo mode.
+	autoApprovePermissions bool
 }
 
 type acpSession struct {
@@ -505,6 +512,18 @@ func (s *acpSession) RespondPermission(requestID string, result core.PermissionR
 		"id":      pending.id,
 		"result":  map[string]any{"outcome": outcome},
 	})
+}
+
+// pickAutoApproveOption chooses the option that grants the request for the rest
+// of the session, falling back to any allow-shaped option.
+func pickAutoApproveOption(options []acpPermissionOption) string {
+	for _, opt := range options {
+		blob := strings.ToLower(opt.Kind + " " + opt.OptionID + " " + opt.Name)
+		if strings.Contains(blob, "allow") && strings.Contains(blob, "always") {
+			return opt.OptionID
+		}
+	}
+	return pickPermissionOption(options, true)
 }
 
 // pickPermissionOption chooses the ACP option matching the user's decision.

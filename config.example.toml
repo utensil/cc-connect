@@ -1940,6 +1940,15 @@ app_secret = "your-feishu-app-secret"
 # - model = model id from `grok models` (e.g. "grok-4.7"); leave empty to follow
 #   the CLI's own default, which is always the newest model
 # - reasoning_effort = xhigh|high|medium|low (model dependent)
+# - auto_approve_permissions = true|false (default false, acp backend)
+#   Answers a permission request inside the adapter instead of posting it to the
+#   platform. Needed for the requests Grok raises from Claude-compatible `deny`
+#   / `ask` rules it merges out of ~/.claude/settings.json (a global
+#   `Read(.env)` deny, for example): --always-approve does not override those,
+#   and no CLI flag, env var or --allow rule does either. The adapter selects
+#   the session-wide allow option (`always-allow`) and logs
+#   `grok acp: permission auto-approved`; a request with no allow option is
+#   still forwarded to the platform.
 # - max_turns = optional agent turn ceiling per prompt (headless backend only)
 # - timeout_mins = optional per-turn timeout (acp cancels the turn on expiry)
 
@@ -1955,6 +1964,7 @@ app_secret = "your-feishu-app-secret"
 # # backend = "acp"          # default / 默认；"headless" for one process per turn
 # # steer_delivery = "native" # default; "cancel" if native steering is unwanted
 # mode = "yolo"
+# # auto_approve_permissions = true   # answer grok's permission prompts in-process
 # model = ""                  # empty → newest model the CLI defaults to / 留空则用 CLI 默认最新模型
 # reasoning_effort = "high"
 # # max_turns = 40
