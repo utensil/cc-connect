@@ -393,3 +393,92 @@ func TestProcessMessage_StripsIdQualifiedMentionBeforeDispatch(t *testing.T) {
 		t.Fatalf("core.Message.Content = %q, want %q", got.Content, "/model gpt-5.6-luna max")
 	}
 }
+
+// The engine updates the streaming card on every streamed chunk, so without a
+// throttle a Zulip turn PATCHes the message per token. Updates are coalesced to
+// one write per cardUpdateMinInterval; Finalize always writes.
+func TestStreamingCard_ThrottlesRapidUpdates(t *testing.T) {
+	var mu sync.Mutex
+	posts, patches := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		switch r.Method {
+		case http.MethodPost:
+			posts++
+		case http.MethodPatch:
+			patches++
+		}
+		mu.Unlock()
+		_, _ = fmt.Fprint(w, `{"result":"success","id":4242,"msg":""}`)
+	}))
+	defer server.Close()
+
+	p := newTestPlatform(t, server.URL, nil)
+	card, err := p.CreateStreamingCard(context.Background(), replyContext{
+		kind: "stream", stream: "tasks", topic: "fdip-grok",
+	})
+	if err != nil {
+		t.Fatalf("CreateStreamingCard() error = %v", err)
+	}
+
+	ctx := context.Background()
+	if err := card.Update(ctx, "first body"); err != nil { // initial POST
+		t.Fatalf("Update(first) error = %v", err)
+	}
+	for _, body := range []string{"second body", "third body"} {
+		if err := card.Update(ctx, body); err != nil { // inside the window: coalesced
+			t.Fatalf("Update(%q) error = %v", body, err)
+		}
+	}
+	mu.Lock()
+	gotPosts, gotPatches := posts, patches
+	mu.Unlock()
+	if gotPosts != 1 || gotPatches != 0 {
+		t.Fatalf("rapid updates = %d POST / %d PATCH, want 1 / 0", gotPosts, gotPatches)
+	}
+
+	// The final body must land even though the throttle window is still open.
+	if err := card.Finalize(ctx, "final body"); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+	mu.Lock()
+	gotPosts, gotPatches = posts, patches
+	mu.Unlock()
+	if gotPosts != 1 || gotPatches != 1 {
+		t.Fatalf("after Finalize = %d POST / %d PATCH, want 1 / 1", gotPosts, gotPatches)
+	}
+}
+
+// Repeated identical bodies never produce a request, throttle or not.
+func TestStreamingCard_SkipsIdenticalBodies(t *testing.T) {
+	var mu sync.Mutex
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			mu.Lock()
+			patches++
+			mu.Unlock()
+		}
+		_, _ = fmt.Fprint(w, `{"result":"success","id":4242,"msg":""}`)
+	}))
+	defer server.Close()
+
+	p := newTestPlatform(t, server.URL, nil)
+	card, err := p.CreateStreamingCard(context.Background(), replyContext{kind: "stream", stream: "tasks", topic: "t"})
+	if err != nil {
+		t.Fatalf("CreateStreamingCard() error = %v", err)
+	}
+	ctx := context.Background()
+	if err := card.Finalize(ctx, "same body"); err != nil {
+		t.Fatalf("Finalize(first) error = %v", err)
+	}
+	if err := card.Finalize(ctx, "same body"); err != nil {
+		t.Fatalf("Finalize(same) error = %v", err)
+	}
+	mu.Lock()
+	got := patches
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("identical finalize bodies produced %d PATCH, want 0", got)
+	}
+}
