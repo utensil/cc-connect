@@ -368,9 +368,17 @@ session-scoped switching on a codex or pi project.
   and its `toolCallId` is resolved back to the tool name from its `tool_call`.
 - Model catalog: `AvailableModels`/`AvailableReasoningEfforts` read the ACP
   `initialize` result of `grok agent stdio` (`_meta.modelState`), which reports
-  ids, display names, context windows and the per-model reasoning efforts and
-  needs **no login**. `grok models` is the fallback and a static list the last
-  resort; the probe is cached for 10 minutes.
+  ids, display names, context windows and the per-model reasoning efforts (and
+  needs no login for the shape; the account's own catalog needs auth).
+  `grok models` is the fallback and a static list the last resort; the probe is
+  cached for 10 minutes.
+- Default model: when no `model` is configured the adapter passes no `-m`, so
+  each turn runs on whatever the CLI currently defaults to — the newest model
+  (grok-4.7 at the time of writing, grok-4.6/4.5 also offered). `GetModel`
+  reports that CLI default from the cached catalog, so `/model` and `/current`
+  stay informative without pinning a version that rots. Verified that
+  `--resume <sessionId> -m <other model>` is accepted, so a live `/model` switch
+  keeps the conversation instead of restarting it.
 - Live switching: the session implements `LiveModelSwitcher` and
   `LiveReasoningEffortSwitcher`, so `/model` and `/reasoning` change the next
   turn of the same conversation without clearing history (each turn is a new

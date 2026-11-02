@@ -106,3 +106,101 @@ func contains(args []string, want string) bool {
 	}
 	return false
 }
+
+// TestLocalTurnThroughAdapter is an end-to-end live turn: it starts a real
+// `grok -p` process through the adapter and asserts the streaming-json frames we
+// depend on arrive as core events (thinking coalesced, text coalesced, a
+// terminal result carrying the session id). It costs tokens, so it needs its own
+// opt-in:
+//
+//	GROK_LOCAL_INTEGRATION=1 GROK_LOCAL_TURN=1 go test ./agent/grok -run TestLocalTurnThroughAdapter -v
+func TestLocalTurnThroughAdapter(t *testing.T) {
+	if os.Getenv("GROK_LOCAL_INTEGRATION") == "" || os.Getenv("GROK_LOCAL_TURN") == "" {
+		t.Skip("set GROK_LOCAL_INTEGRATION=1 GROK_LOCAL_TURN=1 to run a real Grok turn")
+	}
+	bin := os.Getenv("GROK_BIN")
+	if bin == "" {
+		bin = "grok"
+	}
+	dir := t.TempDir()
+	agent, err := New(map[string]any{
+		"work_dir":         dir,
+		"cmd":              bin,
+		"mode":             "yolo",
+		"reasoning_effort": "low",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer agent.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	sess, err := agent.StartSession(ctx, "")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer sess.Close()
+
+	if err := sess.Send("Reply with exactly: PONG", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var (
+		thinking, text strings.Builder
+		result         *core.Event
+	)
+	deadline := time.After(3 * time.Minute)
+	for result == nil {
+		select {
+		case evt, ok := <-sess.Events():
+			if !ok {
+				t.Fatal("events channel closed before a result")
+			}
+			switch evt.Type {
+			case core.EventThinking:
+				thinking.WriteString(evt.Content)
+			case core.EventText:
+				text.WriteString(evt.Content)
+			case core.EventError:
+				t.Fatalf("turn error: %v", evt.Error)
+			case core.EventResult:
+				e := evt
+				result = &e
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a result")
+		}
+	}
+
+	if !result.Done {
+		t.Error("terminal event must be Done")
+	}
+	if result.SessionID == "" {
+		t.Error("terminal event must carry a grok session id for --resume")
+	}
+	if !strings.Contains(strings.ToUpper(text.String()), "PONG") {
+		t.Fatalf("expected PONG in the streamed text, got %q", text.String())
+	}
+	t.Logf("session=%s thinking=%dB text=%q usage in=%d out=%d",
+		result.SessionID, thinking.Len(), text.String(), result.InputTokens, result.OutputTokens)
+
+	// The adapter must be able to resume that session id and keep the model
+	// switch live (verified manually against the CLI as well).
+	runtimeStarter, ok := agent.(core.SessionRuntimeStarter)
+	if !ok {
+		t.Fatal("grok agent must implement core.SessionRuntimeStarter")
+	}
+	sess2, err := runtimeStarter.StartSessionWithRuntime(ctx, result.SessionID, "grok-4.5", "low")
+	if err != nil {
+		t.Fatalf("StartSessionWithRuntime: %v", err)
+	}
+	defer sess2.Close()
+	args := sess2.(*grokSession).buildArgs("hi", "")
+	if !contains(args, "--resume") || !contains(args, result.SessionID) {
+		t.Fatalf("resume id missing from args: %v", args)
+	}
+	if !contains(args, "grok-4.5") {
+		t.Fatalf("model override missing from args: %v", args)
+	}
+}
