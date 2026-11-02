@@ -473,6 +473,10 @@ agent worked was queued until the turn ended and `/stop` killed the process.
 - Transport-level tests (`agent/grok/acp_test.go`) drive a scripted fake agent
   over pipes, so the frame handling, steer folding, cancel and permission flows
   are covered without the CLI.
+- Fork commit: [167a2bda](https://github.com/utensil/cc-connect/commit/167a2bda)
+  on `feat/grok-acp`, [PR #20](https://github.com/utensil/cc-connect/pull/20).
+  Supersedes the headless transport as the default; `backend = "headless"`
+  keeps that path available for rollback.
 
 ### Combined `/agent <type> [path] [model] [reasoning]`
 
