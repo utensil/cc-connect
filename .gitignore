@@ -153,3 +153,7 @@ credentials/
 
 .codex
 cc-connect-new
+
+# WebSocket platform test session stores (written by the core test suite)
+test_ws_*.json
+core/test_ws_*.json
