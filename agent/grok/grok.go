@@ -1,3 +1,14 @@
+// Package grok drives xAI's Grok Build CLI (https://x.ai/cli) in headless mode.
+//
+// Provenance: the turn/process skeleton, mode mapping, provider env, skill and
+// memory providers, and the ~/.grok session store originate from the *unmerged*
+// upstream PR chenhg5/cc-connect#1558 (liyang480). The upstream repository
+// carries no LICENSE file, so attribution is by link. The streaming-json event
+// mapping, the ACP-derived model/effort catalog, live /model and /reasoning
+// switching, the Send/Close lifetime fix and the fork's /agent integration were
+// written for this fork. See FORK_FEATURES.md ("Native Grok Build") for the full
+// ledger.
+
 package grok
 
 import (
