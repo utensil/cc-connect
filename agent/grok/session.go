@@ -56,7 +56,6 @@ type grokSession struct {
 	sessionID atomic.Value // string
 	ctx       context.Context
 	cancel    context.CancelFunc
-	wg        sync.WaitGroup
 	alive     atomic.Bool
 
 	// sendMu serializes Send() so two turns never race on the same session.
@@ -73,6 +72,19 @@ type grokSession struct {
 	// toolNames maps a toolCallId to the tool name reported by its tool_call
 	// frame, because tool_call_update frames only carry the id.
 	toolNames map[string]string
+
+	// turnWg tracks in-flight turns so Close cannot close the events channel
+	// while a readLoop goroutine may still emit into it. sendMu serializes
+	// Send() and guards the turnWg increment (see beginTurn).
+	turnWg sync.WaitGroup
+
+	// lastUsage holds the most recent usage block seen in this turn, so a
+	// terminal end frame without usage still reports token counts.
+	lastUsage map[string]any
+
+	// textEmitted records whether streaming text was already delivered this
+	// turn, so the terminal frame does not duplicate it as EventResult.Content.
+	textEmitted bool
 }
 
 func newGrokSession(ctx context.Context, cfg sessionConfig) (*grokSession, error) {
@@ -145,8 +157,21 @@ func (gs *grokSession) buildArgs(promptInline, promptFile string) []string {
 	return args
 }
 
-func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+// beginTurn admits a turn only while the session is alive. Holding sendMu
+// around the WaitGroup increment is what keeps Close from closing the events
+// channel between the liveness check and the goroutine that emits into it.
+func (gs *grokSession) beginTurn() bool {
+	gs.sendMu.Lock()
+	defer gs.sendMu.Unlock()
 	if !gs.alive.Load() {
+		return false
+	}
+	gs.turnWg.Add(1)
+	return true
+}
+
+func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if !gs.beginTurn() {
 		return fmt.Errorf("session is closed")
 	}
 
@@ -246,7 +271,11 @@ func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files 
 			if promptFile != "" {
 				os.Remove(promptFile)
 			}
+			for _, f := range append(imageRefs, fileRefs...) {
+				os.Remove(f)
+			}
 			gs.sendMu.Unlock()
+			gs.turnWg.Done()
 		}
 	}()
 
@@ -275,9 +304,8 @@ func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files 
 	}
 
 	started = true
-	gs.wg.Add(1)
 	go func() {
-		defer gs.wg.Done()
+		defer gs.turnWg.Done()
 		defer cancel()
 		defer gs.sendMu.Unlock()
 		defer func() {
@@ -304,7 +332,6 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	var scanErr error
-	var lastUsage map[string]any
 	var sawEnd bool
 
 	for scanner.Scan() {
@@ -320,7 +347,12 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 			continue
 		}
 		if usage, ok := raw["usage"].(map[string]any); ok {
-			lastUsage = usage
+			gs.lastUsage = usage
+		}
+		if sawEnd {
+			// `end` is the last frame; ignore anything a build may append so a
+			// second terminal frame cannot emit a second Done result.
+			continue
 		}
 		if gs.handleEvent(raw) {
 			sawEnd = true
@@ -329,7 +361,9 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 	scanErr = scanner.Err()
 	waitErr := cmd.Wait()
 
-	if scanErr != nil {
+	// A stop closes stdout to interrupt the scan, so a scanner error after ctx
+	// cancellation is expected and must not surface as a failure bubble.
+	if scanErr != nil && ctx.Err() == nil {
 		slog.Error("grokSession: scanner error", "error", scanErr)
 		gs.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)})
 	}
@@ -360,7 +394,7 @@ func (gs *grokSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 			SessionID: gs.CurrentSessionID(),
 			Done:      true,
 		}
-		applyUsage(&evt, lastUsage)
+		applyUsage(&evt, gs.lastUsage)
 		gs.emit(evt)
 	}
 }
@@ -420,8 +454,9 @@ func (gs *grokSession) handleEvent(raw map[string]any) bool {
 	case "tool_call_update", "tool_result", "tool_response", "function_result":
 		// tool_call_update also carries in_progress frames; only a terminal
 		// status is worth a result event, and only when it carries output.
+		status := ""
 		if typ == "tool_call_update" {
-			status := strings.ToLower(strings.TrimSpace(stringOf(raw["status"])))
+			status = strings.ToLower(strings.TrimSpace(stringOf(raw["status"])))
 			if status != "completed" && status != "failed" {
 				return false
 			}
@@ -433,11 +468,17 @@ func (gs *grokSession) handleEvent(raw map[string]any) bool {
 			name = gs.toolNames[id]
 		}
 		if result != "" || name != "" {
-			gs.emit(core.Event{
+			evt := core.Event{
 				Type:       core.EventToolResult,
 				ToolName:   name,
 				ToolResult: truncate(result, 500),
-			})
+				ToolStatus: status,
+			}
+			if status == "completed" || status == "failed" {
+				ok := status == "completed"
+				evt.ToolSuccess = &ok
+			}
+			gs.emit(evt)
 		}
 		return false
 
@@ -476,11 +517,17 @@ func (gs *grokSession) handleEvent(raw map[string]any) bool {
 		}
 		if usage, ok := raw["usage"].(map[string]any); ok {
 			applyUsage(&evt, usage)
+		} else {
+			// A standalone {"type":"usage"} frame earlier in the turn still
+			// carries the token counts for this response.
+			applyUsage(&evt, gs.lastUsage)
 		}
-		// Some end events include a final text blob.
-		if text := eventDataString(raw); text != "" {
-			// Prefer streaming text already emitted; only use as Content for footer/fallback.
-			evt.Content = text
+		// Only fall back to the terminal text blob when nothing was streamed,
+		// otherwise the engine would post the already-delivered reply twice.
+		if !gs.textEmitted {
+			if text := eventDataString(raw); text != "" {
+				evt.Content = text
+			}
 		}
 		gs.emit(evt)
 		return true
@@ -517,6 +564,7 @@ func (gs *grokSession) flushText() {
 	if text == "" {
 		return
 	}
+	gs.textEmitted = true
 	gs.emit(core.Event{Type: core.EventText, Content: text, SessionID: gs.CurrentSessionID()})
 }
 
@@ -746,17 +794,22 @@ func (gs *grokSession) Close() error {
 	if !gs.alive.CompareAndSwap(true, false) {
 		return nil
 	}
+	// Cancel first so an in-flight turn is interrupted, then take the sendMu
+	// barrier: the turn's goroutine releases it after readLoop returns, so this
+	// also proves no new turn can pass beginTurn's liveness check anymore.
 	gs.cancel()
+	gs.sendMu.Lock()
+	gs.sendMu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		gs.wg.Wait()
+		gs.turnWg.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 		close(gs.events)
 	case <-time.After(8 * time.Second):
-		slog.Warn("grokSession: close timed out, abandoning wg.Wait")
+		slog.Warn("grokSession: close timed out, abandoning turnWg.Wait")
 	}
 	return nil
 }
