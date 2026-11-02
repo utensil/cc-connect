@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -193,58 +192,7 @@ func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files 
 	// We unlock early only on pre-start failure.
 
 	// Persist attachments so Grok tools can open them by path.
-	attachDir := filepath.Join(gs.workDir, ".cc-connect", "attachments")
-	if (len(images) > 0 || len(files) > 0) && os.MkdirAll(attachDir, 0o755) != nil {
-		attachDir = os.TempDir()
-	}
-
-	var imageRefs []string
-	for i, img := range images {
-		ext := ".png"
-		switch img.MimeType {
-		case "image/jpeg":
-			ext = ".jpg"
-		case "image/gif":
-			ext = ".gif"
-		case "image/webp":
-			ext = ".webp"
-		}
-		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
-			slog.Warn("grokSession: failed to save image", "error", err)
-			continue
-		}
-		imageRefs = append(imageRefs, fpath)
-	}
-
-	var fileRefs []string
-	for i, f := range files {
-		fname := filepath.Base(f.FileName)
-		if fname == "" || fname == "." || fname == ".." {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Warn("grokSession: failed to save file", "error", err)
-			continue
-		}
-		fileRefs = append(fileRefs, fpath)
-	}
-
-	fullPrompt := prompt
-	if len(imageRefs) > 0 {
-		if fullPrompt == "" {
-			fullPrompt = "Please analyze the attached image(s)."
-		}
-		fullPrompt += "\n\n[Attached images saved at: " + strings.Join(imageRefs, ", ") + "]"
-	}
-	if len(fileRefs) > 0 {
-		if fullPrompt == "" {
-			fullPrompt = "Please analyze the attached file(s)."
-		}
-		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
-	}
+	fullPrompt, cleanupAttachments := stageTurnAttachments(gs.workDir, prompt, images, files)
 
 	// Prefer --prompt-file so multi-line / long prompts survive argv limits.
 	var promptFile string
@@ -283,9 +231,7 @@ func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files 
 			if promptFile != "" {
 				os.Remove(promptFile)
 			}
-			for _, f := range append(imageRefs, fileRefs...) {
-				os.Remove(f)
-			}
+			cleanupAttachments()
 			gs.sendMu.Unlock()
 			gs.turnWg.Done()
 		}
@@ -324,9 +270,7 @@ func (gs *grokSession) Send(prompt string, images []core.ImageAttachment, files 
 			if promptFile != "" {
 				os.Remove(promptFile)
 			}
-			for _, f := range append(imageRefs, fileRefs...) {
-				os.Remove(f)
-			}
+			cleanupAttachments()
 		}()
 		gs.readLoop(ctx, cmd, stdout, &stderrBuf)
 	}()
