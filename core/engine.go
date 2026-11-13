@@ -10964,6 +10964,13 @@ func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
 
 func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool) bool {
 	e.interactiveMu.Lock()
+	// held tracks whether interactiveMu is still held: the canceller branch
+	// releases it before waiting on CancelTurn (which can take the adapter's
+	// whole settle timeout), and its failure path falls through to
+	// normalCleanup, which must not unlock a mutex it no longer holds — Go
+	// treats that as `fatal error: sync: unlock of unlocked mutex`, an
+	// unrecoverable throw. The map mutation there also needs the lock back.
+	held := true
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil {
 		e.interactiveMu.Unlock()
@@ -10987,6 +10994,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		// Don't markStopped — the session is still usable.
 		// Don't delete from interactiveStates — keep it alive.
 		e.interactiveMu.Unlock()
+		held = false
 
 		if pending != nil {
 			pending.resolve()
@@ -11027,6 +11035,9 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	}
 
 normalCleanup:
+	if !held {
+		e.interactiveMu.Lock()
+	}
 	state.markStopped()
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()

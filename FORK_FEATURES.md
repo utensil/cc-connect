@@ -117,6 +117,23 @@ steering as unsupported. Enable `rpc = true` for any Pi agent used with
 - Upstream status: no Pi steering implementation was found in the canonical
   repository; generic steering API work remains in competing upstream PRs.
 
+### A failed `/stop` cancel must not double-unlock `interactiveMu`
+
+`stopInteractiveSessionWithOptions` releases `e.interactiveMu` before waiting on
+`CancelTurn()` (it must: the adapter may take its whole settle timeout). When
+`CancelTurn` reported failure, the code fell through with `goto normalCleanup`,
+which unlocked that mutex a second time and mutated `e.interactiveStates` without
+the lock. Go treats the double unlock as `fatal error: sync: unlock of unlocked
+mutex` — a runtime throw, not a recoverable panic — so `/stop` on a session whose
+cancel failed killed the process instead of falling back to `Close`.
+
+The fix tracks whether the mutex is still held and re-acquires it before the map
+mutation, so the unlock is paired on both paths. Regression test:
+`TestStop_CancelFailureFallsBackToClose` (kills the test binary before the fix).
+
+Upstream status: the canonical engine has the same shape, and its `agent/acp`
+`CancelTurn` is fire-and-forget, so this fork fixes it here only.
+
 ### Pi turn cancellation and output policy
 
 Pi RPC prompts always carry Pi's required `streamingBehavior = "followUp"`;

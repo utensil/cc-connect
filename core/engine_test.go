@@ -17486,3 +17486,58 @@ func TestStop_SilentStopStillClearsQueue(t *testing.T) {
 		t.Fatalf("silent stop sent %v, want nothing", sent)
 	}
 }
+
+// errCancelStubSession models an adapter whose CancelTurn reports failure, the
+// trigger for the /stop fallback that closes the session instead.
+type errCancelStubSession struct {
+	stubAgentSession
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *errCancelStubSession) CancelTurn() error { return errors.New("cancel failed") }
+
+func (s *errCancelStubSession) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return s.stubAgentSession.Close()
+}
+
+// TestStop_CancelFailureFallsBackToClose pins the fix for a fatal double unlock:
+// when CancelTurn reports failure, stopInteractiveSessionWithOptions falls through
+// from the canceller branch (which already released interactiveMu) to
+// normalCleanup, which used to unlock it again and mutate interactiveStates
+// without the lock — `fatal error: sync: unlock of unlocked mutex`, an
+// unrecoverable throw that killed the process mid-/stop.
+func TestStop_CancelFailureFallsBackToClose(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	session := &errCancelStubSession{closed: make(chan struct{})}
+	iKey := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{agentSession: session, platform: p, replyCtx: "ctx-1"}
+	e.interactiveMu.Unlock()
+
+	e.cmdStop(p, &Message{SessionKey: iKey, ReplyCtx: "ctx-1"})
+
+	select {
+	case <-session.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close must run after a failing CancelTurn")
+	}
+
+	// Balanced lock: taking it would panic if normalCleanup unlocked twice, and a
+	// lock left held would block here.
+	e.interactiveMu.Lock()
+	_, stillThere := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if stillThere {
+		t.Fatal("session still registered after the Close fallback")
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "Execution stopped") {
+		t.Fatalf("replies = %v, want a stopped confirmation", sent)
+	}
+}
