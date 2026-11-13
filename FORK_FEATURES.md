@@ -134,6 +134,35 @@ mutation, so the unlock is paired on both paths. Regression test:
 Upstream status: the canonical engine has the same shape, and its `agent/acp`
 `CancelTurn` is fire-and-forget, so this fork fixes it here only.
 
+### A steering message never ends an agent run
+
+Steering a grok turn natively sends a second `session/prompt`. Grok 1.0.70 may
+answer that by cancelling the *running* prompt and serving the steer instruction
+as its own turn. `settlePrompt` only treated a cancel as a handover when the
+adapter itself had marked it (`steerByCancel`), so a cancel issued by the CLI
+closed the run: the reply for it was empty while the steer prompt's answer arrived
+afterwards as unsolicited events for a run that no longer existed.
+
+Two rules, and nothing else:
+
+- **A steering message never ends a run.** `settlePrompt` hands the run over when
+  a cancel it did not request (`reason == cancelNone`) arrives while a
+  `promptSteer` prompt is still open. An explicit `/stop` still closes the run.
+  A steer prompt that settles `cancelled` with no other prompt in flight closes it
+  too, so a `/stop` issued after a handover cannot leave the session busy.
+- **Nothing to say produces no message.** `core` no longer substitutes the
+  `MsgEmptyResponse` placeholder: a turn whose cleaned text is empty is delivered
+  silently. The key stays for out-of-tree `core` users, and the relay path keeps
+  its literal string because bridge callers need one.
+
+Tests: `TestACPSession_CliCancelsPrimaryForSteerKeepsRunOpen` (no terminal event
+before the steer settles, exactly one after),
+`TestACPSession_StopWithPendingSteerClosesRun` and
+`TestTurn_NoTextSendsNoMessage`. `queue.busy_behavior` stays `"steer"`.
+
+Known residual: a steer prompt that never settles after a handover holds the run
+until the existing idle timeout closes it; there is no dedicated watchdog.
+
 ### Pi turn cancellation and output policy
 
 Pi RPC prompts always carry Pi's required `streamingBehavior = "followUp"`;

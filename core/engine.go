@@ -5889,9 +5889,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			}
 			fullResponse = normalizeAgentResponseText(state.agentSession, fullResponse)
-			if fullResponse == "" {
-				fullResponse = e.i18n.T(MsgEmptyResponse)
-			}
 
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not
 			// leak into the delivered text. The on-screen ctx indicator is now
@@ -5901,6 +5898,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
 			baseResponse := cleanResponse
+			// No text means there is nothing to say: a steering message, a
+			// cancelled turn or a deliberately silent agent must not produce a
+			// reply, so the turn is delivered silently rather than posting an
+			// "(empty response)" placeholder. Decided on the cleaned text so a
+			// ctx-marker-only reply counts as empty.
+			noText := strings.TrimSpace(baseResponse) == ""
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 
@@ -5930,7 +5933,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
-			isSilent := isSilentReply(baseResponse)
+			isSilent := noText || isSilentReply(baseResponse)
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
 					if strings.TrimSpace(stripped) == "" {

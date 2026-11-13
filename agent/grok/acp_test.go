@@ -965,3 +965,109 @@ func TestACPSession_ResolvesSymlinkedWorkDir(t *testing.T) {
 	}
 	assert.True(t, sawNew)
 }
+
+// drainSessionEventsQuiet keeps reading until the session has been silent for
+// quiet. Terminal results race each other in this scenario, so a drain that stops
+// at the first one cannot tell one result from two.
+func drainSessionEventsQuiet(t *testing.T, s *acpSession, quiet time.Duration) []core.Event {
+	t.Helper()
+	var got []core.Event
+	idle := time.NewTimer(quiet)
+	defer idle.Stop()
+	overall := time.After(5 * time.Second)
+	for {
+		select {
+		case evt := <-s.Events():
+			got = append(got, evt)
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(quiet)
+		case <-idle.C:
+			return got
+		case <-overall:
+			t.Fatalf("timed out waiting for the session to go quiet, got %d events", len(got))
+			return got
+		}
+	}
+}
+
+// TestACPSession_CliCancelsPrimaryForSteerKeepsRunOpen pins the rule that a
+// steering message never ends an agent run: when the CLI cancels the running
+// prompt to serve a pending steer prompt as its own turn, no terminal event is
+// emitted for the cancelled primary, and the steer prompt's answer closes the
+// run instead.
+func TestACPSession_CliCancelsPrimaryForSteerKeepsRunOpen(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", nativeSteer: true})
+
+	require.NoError(t, s.Send("long job", nil, nil))
+	primary := f.expect("session/prompt")
+	f.text("partial progress")
+
+	steerDone := make(chan error, 1)
+	go func() { steerDone <- s.Steer("new guidance") }()
+	steer := f.expect("session/prompt")
+
+	// The CLI cancels the primary by itself: the steer prompt owns the run now, so
+	// the run must still be open — a terminal event here would end it before the
+	// steer prompt's answer exists.
+	f.promptResult(primary.ID, "cancelled", 0, 0)
+	if early := drainSessionEventsQuiet(t, s, 150*time.Millisecond); countResults(early) != 0 {
+		t.Fatalf("run closed on the CLI's cancel before the steer settled: %v", eventTypes(early))
+	}
+	require.NoError(t, <-steerDone)
+
+	f.text("the real answer")
+	f.promptResult(steer.ID, "end_turn", 12, 4)
+
+	events := drainSessionEventsQuiet(t, s, 250*time.Millisecond)
+	if got := countResults(events); got != 1 {
+		t.Fatalf("terminal results = %d, want exactly 1 from the steer prompt: %v", got, eventTypes(events))
+	}
+	if got := collectText(events); !strings.Contains(got, "the real answer") {
+		t.Fatalf("text = %q, want the steer prompt's answer", got)
+	}
+}
+
+// TestACPSession_StopWithPendingSteerClosesRun is the first blocker from review:
+// an explicit /stop must close the run even while a steer prompt is pending, so
+// the session cannot stay busy with nobody owning it.
+func TestACPSession_StopWithPendingSteerClosesRun(t *testing.T) {
+	old := acpCancelWait
+	// Generous, so CancelTurn's own settle wait outlives the early-drain window
+	// below and the handover watchdog stays far away.
+	acpCancelWait = 2 * time.Second
+	t.Cleanup(func() { acpCancelWait = old })
+
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", nativeSteer: true})
+	require.NoError(t, s.Send("long job", nil, nil))
+	primary := f.expect("session/prompt")
+
+	steerDone := make(chan error, 1)
+	go func() { steerDone <- s.Steer("guidance") }()
+	steer := f.expect("session/prompt")
+
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- s.CancelTurn() }()
+	require.Eventually(t, func() bool { return f.sawMethod("session/cancel") }, 2*time.Second, 10*time.Millisecond)
+
+	// The stop must close the run right away, while the steer prompt is still
+	// open — not after it settles, and not when the handover watchdog fires.
+	f.promptResult(primary.ID, "cancelled", 0, 0)
+	early := drainSessionEventsQuiet(t, s, 150*time.Millisecond)
+	if got := countResults(early); got != 1 {
+		t.Fatalf("terminal results before the steer settles = %d, want 1: %v", got, eventTypes(early))
+	}
+
+	// /stop waited for every prompt to settle, so settle the steer and confirm the
+	// run is not closed a second time.
+	f.promptResult(steer.ID, "cancelled", 0, 0)
+	require.NoError(t, <-cancelDone)
+	require.NoError(t, <-steerDone)
+	if late := drainSessionEventsQuiet(t, s, 150*time.Millisecond); countResults(late) != 0 {
+		t.Fatalf("second terminal result after the steer settled: %v", eventTypes(late))
+	}
+}

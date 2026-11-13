@@ -83,6 +83,10 @@ type acpSession struct {
 	inflight      map[int64]promptKind
 	primary       int64
 	cancelReasons map[int64]cancelReason
+	// runClosed is set once a terminal event has been emitted for the current run,
+	// so two settles racing for the same run cannot deliver twice. Reset when a
+	// new primary prompt starts a run.
+	runClosed bool
 
 	// streamMu guards the coalescing buffers and the last usage payload, which
 	// the read loop and the prompt-settle goroutines both touch.

@@ -17541,3 +17541,47 @@ func TestStop_CancelFailureFallsBackToClose(t *testing.T) {
 		t.Fatalf("replies = %v, want a stopped confirmation", sent)
 	}
 }
+
+// runEmptyTurn drives one interactive turn whose terminal event carries no text
+// and returns what the platform received.
+func runEmptyTurn(t *testing.T) []string {
+	t.Helper()
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-empty-turn")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-1"}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() { sess.events <- Event{Type: EventResult, Done: true} }()
+
+	session.AddHistory("user", "do the thing")
+	sendDone := make(chan error, 1)
+	sendDone <- nil // the turn's own Send already returned
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, "ctx-1")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn did not complete in time")
+	}
+	return p.getSent()
+}
+
+// TestTurn_NoTextSendsNoMessage pins the operator rule: nothing to say means no
+// message at all — the "(empty response)" placeholder is gone, so a cancelled or
+// steered turn cannot post a reply of its own.
+func TestTurn_NoTextSendsNoMessage(t *testing.T) {
+	if sent := runEmptyTurn(t); len(sent) != 0 {
+		t.Fatalf("sent %v, want nothing for a turn with no text", sent)
+	}
+}
