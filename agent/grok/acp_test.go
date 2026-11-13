@@ -999,3 +999,31 @@ func TestACPSession_CliCancelsPrimaryForSteerKeepsTurnOpen(t *testing.T) {
 		t.Fatalf("text = %q, want the steer turn's answer", got)
 	}
 }
+
+// TestACPSession_HandoverSteerAlsoCancelledClosesTurn keeps the handover from
+// leaving the engine turn open forever: if the CLI cancels the primary and then
+// the steer prompt it handed over to also ends cancelled, one (silent) terminal
+// result must still be emitted.
+func TestACPSession_HandoverSteerAlsoCancelledClosesTurn(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", nativeSteer: true})
+
+	require.NoError(t, s.Send("long job", nil, nil))
+	primary := f.expect("session/prompt")
+
+	steerDone := make(chan error, 1)
+	go func() { steerDone <- s.Steer("new guidance") }()
+	steer := f.expect("session/prompt")
+
+	f.promptResult(primary.ID, "cancelled", 0, 0) // CLI hands the turn over
+	require.NoError(t, <-steerDone)
+	f.promptResult(steer.ID, "cancelled", 0, 0) // ...and then folds it away too
+
+	events := drainSessionEvents(t, s)
+	if got := countResults(events); got != 1 {
+		t.Fatalf("terminal results = %d, want exactly 1: %v", got, eventTypes(events))
+	}
+	res := resultEvent(t, events)
+	if reason, _ := res.Metadata["stop_reason"].(string); reason != "cancelled" {
+		t.Fatalf("stop_reason = %q, want cancelled so the engine stays silent", reason)
+	}
+}

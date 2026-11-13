@@ -129,9 +129,25 @@ events for a turn that no longer existed — the user got **no final reply at al
 
 `settlePrompt` now consults `steerInFlight()`: when a `promptSteer` prompt is
 still open, a `cancelled` primary is a handover, so no terminal event is emitted
-and the steer prompt's own settle delivers the answer. Regression test:
+and the steer prompt's own settle delivers the answer. `handoverPending` closes
+the turn if that steer prompt also ends cancelled, so the session can never be
+left busy with nobody owning the turn. Regression tests:
 `TestACPSession_CliCancelsPrimaryForSteerKeepsTurnOpen` (fails pre-fix with two
-terminal results, one of them empty; passes after).
+terminal results, one of them empty) and
+`TestACPSession_HandoverSteerAlsoCancelledClosesTurn`.
+
+Steering stays the default (`queue.busy_behavior = "steer"`); nothing here asks
+the user to switch to queueing.
+
+### A cancelled turn with no text is silent, not "(empty response)"
+
+Adapters can mark a terminal result with `Metadata["stop_reason"] =
+"cancelled"` (grok does). When such a turn produced no text, the engine now
+suppresses the reply instead of posting the `MsgEmptyResponse` placeholder — the
+placeholder is for a genuinely empty turn, while a cancelled one is already
+explained by the `/stop` confirmation or by the follow-up turn that the steer
+handed over to. Tests: `TestTurn_CancelledStopWithNoTextStaysSilent` and
+`TestTurn_EmptyNonCancelledStillReportsEmptyResponse`.
 
 ### Pi turn cancellation and output policy
 

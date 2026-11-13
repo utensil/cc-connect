@@ -83,6 +83,12 @@ type acpSession struct {
 	inflight      map[int64]promptKind
 	primary       int64
 	cancelReasons map[int64]cancelReason
+	// handoverPending records that the CLI cancelled the primary prompt to
+	// serve a pending steer prompt as its own turn, so nobody owns the engine
+	// turn yet. If that steer prompt also ends cancelled, its settle emits the
+	// terminal result (silently, per the engine's cancelled-stop rule) instead
+	// of leaving the engine turn open forever.
+	handoverPending bool
 
 	// streamMu guards the coalescing buffers and the last usage payload, which
 	// the read loop and the prompt-settle goroutines both touch.

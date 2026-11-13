@@ -765,6 +765,24 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 		// the running turn: the running turn carries the answer, so there is
 		// nothing to finish here.
 		if stopReason == "cancelled" {
+			// If this steer prompt was the one the primary handed the engine turn
+			// over to, nobody else will close that turn: close it here so the
+			// session cannot stay busy forever. The engine stays silent for a
+			// cancelled stop with no text.
+			s.turnMu.Lock()
+			handedOver := s.handoverPending
+			s.handoverPending = false
+			s.turnMu.Unlock()
+			if handedOver {
+				slog.Info("grok acp: handover steer also ended cancelled, closing the engine turn")
+				s.emit(core.Event{
+					Type:      core.EventResult,
+					SessionID: s.CurrentSessionID(),
+					Done:      true,
+					Metadata:  map[string]any{"stop_reason": "cancelled"},
+				})
+				return
+			}
 			slog.Debug("grok acp: steer folded into the active turn")
 			return
 		}
@@ -772,6 +790,9 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 		// it while the agent is blocked on a long tool call, a background task
 		// or a subagent. When the turn ends first, the guidance simply runs as
 		// its own turn; emit the terminal event so its text is not dropped.
+		s.turnMu.Lock()
+		s.handoverPending = false
+		s.turnMu.Unlock()
 		slog.Info("grok acp: steer ran as its own turn", "stop_reason", stopReason)
 		s.emitPromptResult(result)
 		return
@@ -792,10 +813,20 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 			// delivers an empty reply and pushes the steer's answer out as
 			// unsolicited events for a closed turn — i.e. no final reply at all.
 			slog.Info("grok acp: cancelled turn handed over to the pending steer prompt")
+			s.turnMu.Lock()
+			s.handoverPending = true
+			s.turnMu.Unlock()
 			return
 		}
 		slog.Info("grok acp: turn cancelled")
-		s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+		// Mark the stop reason so the engine can stay silent instead of posting
+		// "(empty response)" for a turn that was aborted without producing text.
+		s.emit(core.Event{
+			Type:      core.EventResult,
+			SessionID: s.CurrentSessionID(),
+			Done:      true,
+			Metadata:  map[string]any{"stop_reason": "cancelled"},
+		})
 		return
 	}
 

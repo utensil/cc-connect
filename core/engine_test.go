@@ -17486,3 +17486,70 @@ func TestStop_SilentStopStillClearsQueue(t *testing.T) {
 		t.Fatalf("silent stop sent %v, want nothing", sent)
 	}
 }
+
+// runOneTurn drives a single interactive turn through processInteractiveEvents
+// with the given terminal event and returns what the platform received.
+func runOneTurn(t *testing.T, terminal Event) []string {
+	t.Helper()
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-cancel-silent")
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-1"}
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() { sess.events <- terminal }()
+
+	session.AddHistory("user", "do the thing")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, "ctx-1")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn did not complete in time")
+	}
+	return p.getSent()
+}
+
+// TestTurn_CancelledStopWithNoTextStaysSilent pins the steered-handover noise
+// fix: a turn the agent aborted (stop_reason=cancelled) without producing text
+// must not post "(empty response)" — the user is steering, the answer arrives
+// from the follow-up turn.
+func TestTurn_CancelledStopWithNoTextStaysSilent(t *testing.T) {
+	sent := runOneTurn(t, Event{
+		Type:     EventResult,
+		Done:     true,
+		Metadata: map[string]any{"stop_reason": "cancelled"},
+	})
+	for _, msg := range sent {
+		if strings.Contains(msg, "(empty response)") {
+			t.Fatalf("sent %q, want no empty-response placeholder for a cancelled turn", sent)
+		}
+	}
+}
+
+// TestTurn_EmptyNonCancelledStillReportsEmptyResponse keeps the placeholder for
+// a genuinely empty turn, so the silence above stays specific.
+func TestTurn_EmptyNonCancelledStillReportsEmptyResponse(t *testing.T) {
+	sent := runOneTurn(t, Event{Type: EventResult, Done: true})
+	found := false
+	for _, msg := range sent {
+		if strings.Contains(msg, "(empty response)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sent %v, want the empty-response placeholder for a genuinely empty turn", sent)
+	}
+}

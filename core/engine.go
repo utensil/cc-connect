@@ -1522,6 +1522,17 @@ func liveOutputEnabledForAgent(cfg StreamPreviewCfg, agent Agent) bool {
 	return true
 }
 
+// stopReasonFromEvent reports the agent-reported stop reason carried in the
+// terminal result event, if the adapter set one (e.g. grok marks a cancelled
+// turn). Adapters that do not set it keep the previous behaviour.
+func stopReasonFromEvent(event Event) string {
+	if event.Metadata == nil {
+		return ""
+	}
+	reason, _ := event.Metadata["stop_reason"].(string)
+	return strings.ToLower(strings.TrimSpace(reason))
+}
+
 func normalizeAgentResponseText(session AgentSession, text string) string {
 	if normalizer, ok := session.(AgentResponseNormalizer); ok {
 		return normalizer.NormalizeResponseText(text)
@@ -5889,8 +5900,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			}
 			fullResponse = normalizeAgentResponseText(state.agentSession, fullResponse)
+			// A turn the agent cancelled on its own (a steered message handing
+			// over to the steer prompt, /stop, or the CLI aborting the turn) has
+			// nothing to report. Posting "(empty response)" there reads as a
+			// broken bot, so suppress delivery the same way a NO_REPLY turn is
+			// suppressed; a genuinely empty turn still gets the placeholder.
+			cancelledNoText := false
 			if fullResponse == "" {
-				fullResponse = e.i18n.T(MsgEmptyResponse)
+				if stopReasonFromEvent(event) == "cancelled" {
+					cancelledNoText = true
+				} else {
+					fullResponse = e.i18n.T(MsgEmptyResponse)
+				}
 			}
 
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not
@@ -5930,7 +5951,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
-			isSilent := isSilentReply(baseResponse)
+			isSilent := isSilentReply(baseResponse) || cancelledNoText
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
 					if strings.TrimSpace(stripped) == "" {
