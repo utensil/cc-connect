@@ -965,3 +965,37 @@ func TestACPSession_ResolvesSymlinkedWorkDir(t *testing.T) {
 	}
 	assert.True(t, sawNew)
 }
+
+// TestACPSession_CliCancelsPrimaryForSteerKeepsTurnOpen reproduces the live
+// failure where a steered message produced no reply at all: the grok CLI cancels
+// the running prompt on its own when it decides to serve the pending steer
+// prompt as a fresh turn. Emitting a terminal result for that cancel closed the
+// engine turn, so the empty cancel was delivered as the reply and the steer's
+// actual answer arrived afterwards as unsolicited events.
+func TestACPSession_CliCancelsPrimaryForSteerKeepsTurnOpen(t *testing.T) {
+	s, f := startFakeACP(t, acpConfig{mode: "yolo", nativeSteer: true})
+
+	require.NoError(t, s.Send("long job", nil, nil))
+	primary := f.expect("session/prompt")
+	f.text("partial progress")
+
+	steerDone := make(chan error, 1)
+	go func() { steerDone <- s.Steer("new guidance") }()
+	steer := f.expect("session/prompt")
+
+	// The CLI cancels the primary by itself: the steer prompt is the turn now.
+	f.promptResult(primary.ID, "cancelled", 0, 0)
+	require.NoError(t, <-steerDone)
+
+	// No terminal result may be emitted for the cancelled primary.
+	f.text("the real answer")
+	f.promptResult(steer.ID, "end_turn", 12, 4)
+
+	events := drainSessionEvents(t, s)
+	if got := countResults(events); got != 1 {
+		t.Fatalf("terminal results = %d, want exactly 1 (the steer turn's): %v", got, eventTypes(events))
+	}
+	if got := collectText(events); !strings.Contains(got, "the real answer") {
+		t.Fatalf("text = %q, want the steer turn's answer", got)
+	}
+}

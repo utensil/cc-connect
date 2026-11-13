@@ -700,6 +700,21 @@ func (s *acpSession) takeCancelReason(id int64) cancelReason {
 	return reason
 }
 
+// steerInFlight reports whether a steering prompt is still open. The grok CLI
+// may cancel the running prompt on its own when it decides to serve a pending
+// steer prompt as a fresh turn; that cancel hands the engine turn over to the
+// steer prompt instead of ending it.
+func (s *acpSession) steerInFlight(exclude int64) bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	for id, kind := range s.inflight {
+		if id != exclude && kind == promptSteer {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *acpSession) clearInflight(id int64) {
 	s.turnMu.Lock()
 	delete(s.inflight, id)
@@ -769,6 +784,14 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 			// The steer replacement prompt owns the engine turn; closing it here
 			// would end the turn before the guidance runs.
 			slog.Debug("grok acp: cancelled turn replaced by a steer prompt")
+			return
+		}
+		if s.steerInFlight(turn.id) {
+			// The CLI cancelled the running prompt because it is about to serve a
+			// pending steer prompt as its own turn. Ending the engine turn here
+			// delivers an empty reply and pushes the steer's answer out as
+			// unsolicited events for a closed turn — i.e. no final reply at all.
+			slog.Info("grok acp: cancelled turn handed over to the pending steer prompt")
 			return
 		}
 		slog.Info("grok acp: turn cancelled")

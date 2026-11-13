@@ -117,6 +117,22 @@ steering as unsupported. Enable `rpc = true` for any Pi agent used with
 - Upstream status: no Pi steering implementation was found in the canonical
   repository; generic steering API work remains in competing upstream PRs.
 
+### A CLI-initiated cancel hands the turn over to a pending steer
+
+Steering a grok turn natively sends a second `session/prompt`. Grok 1.0.70 may
+answer that by cancelling the *running* prompt and serving the steer instruction
+as its own turn. `settlePrompt` only knew about the adapter's own
+`steerByCancel` marker, so a CLI-initiated cancel was treated as the end of the
+engine turn: the reply delivered for it was empty ("(empty response)" once live
+output is off), and the steer turn's real answer then arrived as unsolicited
+events for a turn that no longer existed — the user got **no final reply at all**.
+
+`settlePrompt` now consults `steerInFlight()`: when a `promptSteer` prompt is
+still open, a `cancelled` primary is a handover, so no terminal event is emitted
+and the steer prompt's own settle delivers the answer. Regression test:
+`TestACPSession_CliCancelsPrimaryForSteerKeepsTurnOpen` (fails pre-fix with two
+terminal results, one of them empty; passes after).
+
 ### Pi turn cancellation and output policy
 
 Pi RPC prompts always carry Pi's required `streamingBehavior = "followUp"`;
