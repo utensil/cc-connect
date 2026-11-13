@@ -615,6 +615,7 @@ func (s *acpSession) promptAsync(text string, kind promptKind, cleanup func()) e
 	s.inflight[turn.id] = kind
 	if kind == promptPrimary {
 		s.primary = turn.id
+		s.runClosed = false
 	}
 	s.turnMu.Unlock()
 
@@ -700,6 +701,42 @@ func (s *acpSession) takeCancelReason(id int64) cancelReason {
 	return reason
 }
 
+// claimRunClose reports true exactly once per run, so two settles racing for the
+// same run cannot emit two terminal events.
+func (s *acpSession) claimRunClose() bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if s.runClosed {
+		return false
+	}
+	s.runClosed = true
+	return true
+}
+
+// steerInFlight reports whether a steering prompt is still open.
+func (s *acpSession) steerInFlight() bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	for _, kind := range s.inflight {
+		if kind == promptSteer {
+			return true
+		}
+	}
+	return false
+}
+
+// otherInFlight reports whether any prompt other than exclude is still open.
+func (s *acpSession) otherInFlight(exclude int64) bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	for id := range s.inflight {
+		if id != exclude {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *acpSession) clearInflight(id int64) {
 	s.turnMu.Lock()
 	delete(s.inflight, id)
@@ -710,6 +747,10 @@ func (s *acpSession) clearInflight(id int64) {
 }
 
 // settlePrompt turns a settled session/prompt reply into engine events.
+//
+// A steering message never ends a run: a cancel the adapter did not request, seen
+// while a steer prompt is still open, hands the run over to that prompt instead of
+// emitting the terminal event.
 func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 	s.flushThought()
 
@@ -750,7 +791,18 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 		// the running turn: the running turn carries the answer, so there is
 		// nothing to finish here.
 		if stopReason == "cancelled" {
-			slog.Debug("grok acp: steer folded into the active turn")
+			if s.otherInFlight(turn.id) {
+				slog.Debug("grok acp: steer folded into the active turn")
+				return
+			}
+			// Nothing else is running, so this settle is the last one for the run and
+			// must close it — silently, since a cancelled prompt has no answer. This
+			// is the case after a handover: /stop cancels the steer prompt that owns
+			// the run, and without this close the session would stay busy.
+			if s.claimRunClose() {
+				slog.Info("grok acp: steer folded with no other prompt in flight, closing the run")
+				s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+			}
 			return
 		}
 		// Grok delivers steering at its next safe point and deliberately holds
@@ -758,7 +810,9 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 		// or a subagent. When the turn ends first, the guidance simply runs as
 		// its own turn; emit the terminal event so its text is not dropped.
 		slog.Info("grok acp: steer ran as its own turn", "stop_reason", stopReason)
-		s.emitPromptResult(result)
+		if s.claimRunClose() {
+			s.emitPromptResult(result)
+		}
 		return
 	}
 
@@ -771,8 +825,18 @@ func (s *acpSession) settlePrompt(turn *promptTurn, frame acpFrame) {
 			slog.Debug("grok acp: cancelled turn replaced by a steer prompt")
 			return
 		}
+		if reason == cancelNone && s.steerInFlight() {
+			// The CLI cancelled the running prompt because it is about to serve a
+			// pending steer prompt as its own turn. A steering message is guidance,
+			// never a reason to end a run, so hand the run over; the steer prompt's
+			// own settle carries the answer. An explicit stop never hands over.
+			slog.Info("grok acp: cancelled turn handed over to the pending steer prompt", "prompt_id", turn.id)
+			return
+		}
 		slog.Info("grok acp: turn cancelled")
-		s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+		if s.claimRunClose() {
+			s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+		}
 		return
 	}
 
