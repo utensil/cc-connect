@@ -643,7 +643,21 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
+	// Self-heal: discordgo retries a dead gateway forever, so a poisoned transport leaves the bot
+	// "running" but deaf for days. Report connectivity to the watchdog and let it exit for a
+	// supervisor restart once the budget is spent.
+	gatewayWatch := core.NewWatch(core.PlatformDownExitAfter, func(down time.Duration) {
+		core.ExitPlatformDown("discord", "gateway disconnected", down)
+	})
+	session.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
+		gatewayWatch.MarkDown()
+	})
+	session.AddHandler(func(s *discordgo.Session, r *discordgo.Resumed) {
+		gatewayWatch.Up()
+	})
+
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		gatewayWatch.Up()
 		p.botID = r.User.ID
 		p.appID = r.User.ID
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)

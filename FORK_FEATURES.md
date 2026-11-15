@@ -322,6 +322,24 @@ fresher, like it had answered about the wrong project.
 - Merge record: [PR #17](https://github.com/utensil/cc-connect/pull/17) — open, merge is
   human-gated.
 
+### Platform-down self-heal (exit for a supervisor restart)
+
+A platform whose transport dies mid-flight retries forever and never recovers on its own: discordgo
+keeps reconnecting a poisoned gateway, and the Zulip `/events` long-poll keeps failing. Both lanes
+have been observed sitting `launchd state = running` while deaf for days, with no failed exit code to
+notice. `core.DownWatch` now tracks each platform's connectivity, and after
+`core.PlatformDownExitAfter` (10 minutes) of continuous outage the process exits with status 75
+(`EX_TEMPFAIL`) so `KeepAlive{SuccessfulExit=false}` restarts it with fresh connections.
+
+- Reports are cheap and platform-local: Discord feeds `*discordgo.Disconnect` / `*discordgo.Resumed`
+  (plus `Ready`) into the watch, and Zulip feeds each `/events` failure or success. A rejected event
+  queue counts as *reachable* — that is a server answer, not an outage.
+- The budget is deliberately far above a transient flap and far below the multi-day silences it
+  prevents; a genuinely unreachable network costs one restart per interval instead of a dead bot.
+- Files: `core/watchdog.go`, `platform/discord/discord.go`, `platform/zulip/zulip.go`.
+- Tests: `TestDownWatchExpiresOnce`, `TestDownWatchRecoveryCancels`,
+  `TestPlatformDownExitAfterIsProportional`, `TestExitPlatformDownUsesFailureStatus`.
+
 ### Unicode-aware command parsing
 
 Commands split arguments on Unicode whitespace, so pasted Discord text and

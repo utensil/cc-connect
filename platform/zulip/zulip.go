@@ -571,6 +571,12 @@ func (p *Platform) pollLoop(ctx context.Context) {
 	var lastEventID int64 = -1
 	backoff := time.Second
 	consecutiveEventsFailures := 0
+	// Self-heal: the long-poll retries forever, so a dead path leaves the bot "running" but deaf.
+	// Report connectivity to the watchdog and let it exit for a supervisor restart once the budget
+	// is spent.
+	eventsDown := core.NewWatch(core.PlatformDownExitAfter, func(down time.Duration) {
+		core.ExitPlatformDown("zulip", "/events unreachable", down)
+	})
 	const maxBackoff = 60 * time.Second
 	// After this many consecutive /events failures the platform is deaf to Zulip inbound, which
 	// used to stay silent in the log; surface it once at ERROR so it cannot go unnoticed.
@@ -617,6 +623,8 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			}
 			// The event queue can expire (or be rejected); drop it and register a fresh one.
 			if isQueueGone(err) {
+				// A rejected queue is a server answer: the path is fine, so this is not an outage.
+				eventsDown.Up()
 				slog.Warn("zulip: event queue rejected, re-registering", "error", err)
 				queueID = ""
 				// Settle briefly so a realm that keeps rejecting queues cannot drive a tight
@@ -629,6 +637,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 				slog.Error("zulip: /events failing repeatedly — Zulip inbound is deaf until it recovers",
 					"error", err, "consecutive_failures", consecutiveEventsFailures, "backoff", backoff)
 			}
+			eventsDown.MarkDown()
 			slog.Warn("zulip: /events failed", "error", err, "backoff", backoff)
 			sleepCtx(ctx, backoff)
 			backoff = min(backoff*2, maxBackoff)
@@ -636,6 +645,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 		}
 		backoff = time.Second
 		consecutiveEventsFailures = 0
+		eventsDown.Up()
 
 		for _, ev := range events {
 			if ev.ID > lastEventID {
