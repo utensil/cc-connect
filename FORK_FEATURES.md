@@ -211,6 +211,8 @@ under a codex project lost its conversation on the 2026-11-10, 2026-11-13 and
 
 - Fork PR: [#28](https://github.com/utensil/cc-connect/pull/28)
   (`fix/agent-override-survives-restart`).
+- Merge record: [PR #28](https://github.com/utensil/cc-connect/pull/28), merged
+  as [03e5e898](https://github.com/utensil/cc-connect/commit/03e5e898).
 
 Upstream status: fixed in this fork only; the fork's `/agent` switch is itself a
 fork feature.
