@@ -5290,7 +5290,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventSessionRecovered:
 			if event.SessionID != "" && session.GetAgentSessionID() != event.SessionID {
 				wasEmpty := session.GetAgentSessionID() == ""
-				session.SetAgentSessionID(event.SessionID, e.agent.Name())
+				// The id belongs to the agent that is actually running this turn,
+				// which may be a per-session /agent override rather than the
+				// project default e.agent. Tagging it with e.agent would make
+				// InvalidateForAgent treat the session as stale on restart.
+				session.SetAgentSessionID(event.SessionID, replyAgent.Name())
 				if wasEmpty {
 					pendingName := session.GetName()
 					if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -5725,7 +5729,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if event.SessionID != "" {
 				wasEmpty := session.GetAgentSessionID() == ""
 				if session.GetAgentSessionID() != event.SessionID {
-					session.SetAgentSessionID(event.SessionID, e.agent.Name())
+					session.SetAgentSessionID(event.SessionID, replyAgent.Name())
 					if wasEmpty {
 						pendingName := session.GetName()
 						if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -5859,7 +5863,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
 					wasEmpty := session.GetAgentSessionID() == ""
 					if session.GetAgentSessionID() != currentID {
-						session.SetAgentSessionID(currentID, e.agent.Name())
+						session.SetAgentSessionID(currentID, replyAgent.Name())
 						if wasEmpty {
 							pendingName := session.GetName()
 							if pendingName != "" && pendingName != "session" && pendingName != "default" {

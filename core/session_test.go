@@ -422,6 +422,65 @@ func TestSessionManager_InvalidateForAgent(t *testing.T) {
 	}
 }
 
+func TestSessionManager_InvalidateForAgentHonorsAgentOverride(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// A codex project whose thread was switched to another agent with /agent.
+	// The override, not the project default, is the agent the next turn starts.
+	switched := sm.NewSession("user1", "sess1")
+	switched.SetAgentOverride("grok")
+	switched.SetAgentSessionID("grok-id", "grok")
+
+	// An override set before any turn ran: the stored ID still belongs to the
+	// project default, so it cannot be resumed by the overridden agent.
+	stale := sm.NewSession("user2", "sess2")
+	stale.SetAgentOverride("grok")
+	stale.SetAgentSessionID("codex-id", "codex")
+
+	sm.InvalidateForAgent("codex")
+
+	if got := switched.GetAgentSessionID(); got != "grok-id" {
+		t.Errorf("switched AgentSessionID = %q, want %q (override must survive a restart)", got, "grok-id")
+	}
+	if switched.AgentType != "grok" {
+		t.Errorf("switched AgentType = %q, want %q", switched.AgentType, "grok")
+	}
+
+	if got := stale.GetAgentSessionID(); got != "" {
+		t.Errorf("stale AgentSessionID = %q, want empty (owned by the project default)", got)
+	}
+	if stale.AgentType != "grok" {
+		t.Errorf("stale AgentType = %q, want %q after invalidation", stale.AgentType, "grok")
+	}
+}
+
+// TestSessionManager_InvalidateForAgentAfterRestart reproduces the production
+// restart through the store: a persisted override session must survive a second
+// SessionManager built for the project's default agent.
+func TestSessionManager_InvalidateForAgentAfterRestart(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	sessionKey := "test:user1"
+
+	sm := NewSessionManager(storePath)
+	s := sm.GetOrCreateActive(sessionKey)
+	s.SetAgentOverride("grok")
+	s.SetAgentSessionID("grok-id", "grok")
+	sm.Save()
+
+	// A cc-connect restart: the engine is constructed for the project default.
+	restarted := NewSessionManager(storePath)
+	restarted.InvalidateForAgent("codex")
+	restarted.Save()
+
+	reloaded := NewSessionManager(storePath).GetOrCreateActive(sessionKey)
+	if got := reloaded.GetAgentSessionID(); got != "grok-id" {
+		t.Fatalf("agent session id after restart = %q, want grok-id (conversation resumed, not restarted)", got)
+	}
+	if reloaded.AgentType != "grok" {
+		t.Fatalf("agent type after restart = %q, want grok", reloaded.AgentType)
+	}
+}
+
 func TestSessionManager_UserMeta(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.GetOrCreateActive("feishu:oc_abc:ou_xyz")

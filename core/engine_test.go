@@ -1806,6 +1806,65 @@ func TestProcessInteractiveEvents_SessionRecoveryIsVisible(t *testing.T) {
 	}
 }
 
+// namedStubAgent is a stub agent with a distinct Name() so a test can tell the
+// project default apart from a session's /agent override.
+type namedStubAgent struct {
+	stubAgent
+	name string
+}
+
+func (a *namedStubAgent) Name() string { return a.name }
+
+// TestProcessInteractiveEvents_TagsSessionIDWithSessionAgent pins the invariant
+// InvalidateForAgent relies on: an agent session id is stored with the agent
+// that owns it, never with the project default. Agents that report their id
+// through a stream event (EventSessionRecovered, EventText, EventResult) used to
+// tag it with e.agent, which made an overridden session look stale to
+// InvalidateForAgent and lose its conversation on the next restart.
+func TestProcessInteractiveEvents_TagsSessionIDWithSessionAgent(t *testing.T) {
+	// A session id reported only by CurrentSessionID() is empty in the first two
+	// cases, so the terminating EventResult cannot mask the path under test.
+	cases := []struct {
+		name      string
+		event     Event
+		sessionID string
+	}{
+		{"recovered", Event{Type: EventSessionRecovered, SessionID: "alpha-1"}, ""},
+		{"text", Event{Type: EventText, Content: "working", SessionID: "alpha-1"}, ""},
+		{"result", Event{Type: EventResult, Content: "done", Done: true}, "alpha-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "plain"}
+			e := NewEngine("test", &namedStubAgent{name: "codexbase"}, []Platform{p}, "", LangEnglish)
+			sessionKey := "test:user1"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession(tc.sessionID)
+			state := &interactiveState{
+				agentSession: agentSession,
+				agent:        &namedStubAgent{name: "alpha"},
+				platform:     p,
+				replyCtx:     "ctx-1",
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- tc.event
+			if !tc.event.Done {
+				// Only a Done result ends the event loop.
+				agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+			}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-"+tc.name, time.Now(), nil, nil, nil)
+
+			if got := session.GetAgentSessionID(); got != "alpha-1" {
+				t.Fatalf("agent session id = %q, want alpha-1", got)
+			}
+			if session.AgentType != "alpha" {
+				t.Fatalf("agent type = %q, want alpha (the session agent, not the project default codexbase)", session.AgentType)
+			}
+		})
+	}
+}
+
 func TestProcessInteractiveEvents_SessionRecoveryStaysOutsideRichCard(t *testing.T) {
 	p := &stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
