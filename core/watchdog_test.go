@@ -10,7 +10,7 @@ import (
 func TestDownWatchExpiresOnce(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan time.Duration, 2)
-	w := NewWatch(50*time.Millisecond, func(down time.Duration) {
+	w := NewWatch("test", 50*time.Millisecond, func(down time.Duration) {
 		calls.Add(1)
 		done <- down
 	})
@@ -43,7 +43,7 @@ func TestDownWatchExpiresOnce(t *testing.T) {
 // Recovering before the budget cancels the pending exit, and a later outage arms a fresh one.
 func TestDownWatchRecoveryCancels(t *testing.T) {
 	expired := make(chan struct{}, 1)
-	w := NewWatch(80*time.Millisecond, func(time.Duration) { expired <- struct{}{} })
+	w := NewWatch("test", 80*time.Millisecond, func(time.Duration) { expired <- struct{}{} })
 
 	w.MarkDown()
 	if d := w.Down(); d <= 0 {
@@ -76,6 +76,16 @@ func TestPlatformDownExitAfterIsProportional(t *testing.T) {
 	if PlatformDownExitAfter > time.Hour {
 		t.Fatalf("PlatformDownExitAfter = %v, too long to prevent a silent multi-hour outage", PlatformDownExitAfter)
 	}
+}
+
+// A non-positive budget falls back to the platform budget instead of exiting instantly.
+func TestNewWatchClampsNonPositiveTimeout(t *testing.T) {
+	w := NewWatch("test", 0, func(time.Duration) { t.Error("zero budget must not expire immediately") })
+	w.MarkDown()
+	if d := w.Down(); d <= 0 {
+		t.Fatalf("Down() = %v, want an armed outage", d)
+	}
+	w.Up()
 }
 
 // The exit must be non-zero: launchd's KeepAlive{SuccessfulExit=false} only restarts on failure.
