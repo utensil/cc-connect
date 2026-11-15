@@ -75,6 +75,10 @@ type Platform struct {
 	botUserID   atomic.Int64
 	botEmail    atomic.Value // string
 	botFullName atomic.Value // string
+
+	// inboundWatch turns "Zulip inbound has been unreachable for too long" into a supervisor
+	// restart; the long-poll retries forever and a dead path never heals by itself.
+	inboundWatch *core.DownWatch
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -551,10 +555,17 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
+	p.inboundWatch = core.NewWatch("zulip", core.PlatformDownExitAfter, func(down time.Duration) {
+		core.ExitPlatformDown("zulip", "/events unreachable", down)
+	})
 
 	userID, email, fullName, err := p.fetchMe(ctx)
 	if err != nil {
 		cancel()
+		// Start has no retry, and a failed start leaves the process with no poll loop and therefore
+		// no watchdog: exit for the supervisor instead of returning an error the caller would turn
+		// into a fast restart loop anyway.
+		core.ExitPlatformDown("zulip", fmt.Sprintf("startup: /users/me failed: %v", err), 0)
 		return fmt.Errorf("zulip: /users/me failed: %w", err)
 	}
 	p.botUserID.Store(userID)
@@ -571,6 +582,10 @@ func (p *Platform) pollLoop(ctx context.Context) {
 	var lastEventID int64 = -1
 	backoff := time.Second
 	consecutiveEventsFailures := 0
+	// Self-heal: the long-poll retries forever, so a dead path leaves the bot "running" but deaf.
+	// Report connectivity to the platform watchdog and let it exit for a supervisor restart once the
+	// budget is spent.
+	eventsDown := p.inboundWatch
 	const maxBackoff = 60 * time.Second
 	// After this many consecutive /events failures the platform is deaf to Zulip inbound, which
 	// used to stay silent in the log; surface it once at ERROR so it cannot go unnoticed.
@@ -599,6 +614,9 @@ func (p *Platform) pollLoop(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
+				// A dead path can fail here instead of on /events (for example right after a queue
+				// was rejected), so this branch must arm the watchdog too. MarkDown is idempotent.
+				eventsDown.MarkDown()
 				slog.Warn("zulip: /register failed", "error", err, "backoff", backoff)
 				sleepCtx(ctx, backoff)
 				backoff = min(backoff*2, maxBackoff)
@@ -617,6 +635,8 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			}
 			// The event queue can expire (or be rejected); drop it and register a fresh one.
 			if isQueueGone(err) {
+				// A rejected queue is a server answer: the path is fine, so this is not an outage.
+				eventsDown.Up()
 				slog.Warn("zulip: event queue rejected, re-registering", "error", err)
 				queueID = ""
 				// Settle briefly so a realm that keeps rejecting queues cannot drive a tight
@@ -629,6 +649,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 				slog.Error("zulip: /events failing repeatedly — Zulip inbound is deaf until it recovers",
 					"error", err, "consecutive_failures", consecutiveEventsFailures, "backoff", backoff)
 			}
+			eventsDown.MarkDown()
 			slog.Warn("zulip: /events failed", "error", err, "backoff", backoff)
 			sleepCtx(ctx, backoff)
 			backoff = min(backoff*2, maxBackoff)
@@ -636,6 +657,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 		}
 		backoff = time.Second
 		consecutiveEventsFailures = 0
+		eventsDown.Up()
 
 		for _, ev := range events {
 			if ev.ID > lastEventID {
@@ -1058,6 +1080,10 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 // ── Stop ─────────────────────────────────────────────────────────────────────
 
 func (p *Platform) Stop() error {
+	if p.inboundWatch != nil {
+		// A deliberate stop must not arm an exit that restarts a job we are stopping.
+		p.inboundWatch.Up()
+	}
 	if p.cancel != nil {
 		p.cancel()
 	}

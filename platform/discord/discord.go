@@ -66,6 +66,10 @@ type Platform struct {
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
 	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
 	self                       core.Platform
+	// gatewayWatch turns "the gateway has been unreachable for too long" into a supervisor restart.
+	// It lives on the Platform, not on a session: buildSession runs once per connect attempt, and a
+	// discarded attempt must not leave a timer behind that fires while a later session is healthy.
+	gatewayWatch *core.DownWatch
 
 	mu               sync.RWMutex
 	session          *discordgo.Session
@@ -620,6 +624,12 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
+	p.gatewayWatch = core.NewWatch("discord", core.PlatformDownExitAfter, func(down time.Duration) {
+		if p.isStopping() {
+			return
+		}
+		core.ExitPlatformDown("discord", "gateway disconnected", down)
+	})
 	p.mu.Unlock()
 
 	go p.connectLoop(ctx)
@@ -643,7 +653,18 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
+	// Self-heal: discordgo retries a dead gateway forever, so a poisoned transport leaves the bot
+	// "running" but deaf for days. Report connectivity to the platform-level watchdog and let it exit
+	// for a supervisor restart once the budget is spent.
+	session.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
+		p.gatewayWatch.MarkDown()
+	})
+	session.AddHandler(func(s *discordgo.Session, r *discordgo.Resumed) {
+		p.gatewayWatch.Up()
+	})
+
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		p.gatewayWatch.Up()
 		p.botID = r.User.ID
 		p.appID = r.User.ID
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)
@@ -800,10 +821,14 @@ func (p *Platform) connectLoop(ctx context.Context) {
 			return
 		}
 
-		// Best-effort cleanup of a half-opened session.
+		// Best-effort cleanup of a half-opened session (its Close also emits Disconnect, which the
+		// watch treats as idempotent).
 		if session != nil {
 			_ = session.Close()
 		}
+		// Arm explicitly instead of relying on that emit: a process started while the network is
+		// down must still reach the budget, and a failed attempt is a real outage.
+		p.gatewayWatch.MarkDown()
 
 		slog.Warn("discord: connect attempt failed",
 			"attempt", attempt,
@@ -1398,9 +1423,15 @@ func (p *Platform) Stop() error {
 	p.stopping = true
 	cancel := p.cancel
 	session := p.session
+	watch := p.gatewayWatch
 	p.cancel = nil
 	p.session = nil
 	p.mu.Unlock()
+
+	if watch != nil {
+		// A deliberate stop must not race an armed exit into a restarting a job we are stopping.
+		watch.Up()
+	}
 
 	if cancel != nil {
 		cancel()
