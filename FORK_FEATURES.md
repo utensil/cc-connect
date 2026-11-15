@@ -163,6 +163,58 @@ before the steer settles, exactly one after),
 Known residual: a steer prompt that never settles after a handover holds the run
 until the existing idle timeout closes it; there is no dedicated watchdog.
 
+### A per-session `/agent` override survives a process restart
+
+`/agent` stores a per-session `agent_override`. `InvalidateForAgent` runs at
+engine construction and drops `agent_session_id` whenever a session's
+`AgentType` disagrees with the agent the engine was built with — right for a
+project whose configured agent changed, but it ignored `agent_override`, so a
+`/agent grok` thread inside a codex project was always judged against the project
+default. That is the observed loss: `session: invalidating stale agent session …
+old_agent=grok new_agent=codex` on every start, and the next message opening a
+fresh agent session (`is_resume=false`).
+
+A second, latent mismatch sat behind it. Agents that report their session id
+through a stream event (`EventSessionRecovered`, `EventText`, `EventResult` —
+claudecode, gemini, cursor, antigravity, copilot, pi) stored it with
+`e.agent.Name()`, the *project default*, so such a session was tagged with an
+agent that does not own the id. That stayed invisible only while the comparison
+operand was also the project default: those sessions are already dropped when the
+project's configured agent changes, and honouring the override on its own would
+have turned the mismatch into a fresh wipe on every restart.
+
+The fix takes the owner per session on both sides: `InvalidateForAgent` uses the
+session's normalized `agent_override` when present (the same precedence as
+`Engine.effectiveAgentTypeFor`), and the three event paths store
+`state.agent`/`replyAgent` — the agent actually running the turn, falling back to
+`e.agent` when there is none. An id that genuinely belongs to another agent is
+still cleared and recorded in `past_agent_session_ids`; sessions without an
+override keep the old behavior exactly.
+
+Tests: `TestSessionManager_InvalidateForAgentAfterRestart` (replays the restart
+through the store and reproduces the production log line on the pre-fix code),
+`TestProcessInteractiveEvents_TagsSessionIDWithSessionAgent` (fails on the
+pre-fix engine on all three event paths) and
+`TestSessionManager_InvalidateForAgentHonorsAgentOverride` (id preserved for a
+matching override, cleared when the stored id belongs to the project default).
+`TestSessionManager_InvalidateForAgent` is unchanged and still passes. No config
+change.
+
+Known residual: an override naming an agent that cannot be constructed (its CLI is
+missing) still falls back to the project default while the override stays set, so
+that session's id is cleared on each start — the same outcome it had before this
+change, now scoped to sessions whose id really is owned by a different agent.
+
+Observed in production: a Zulip topic (`tasks > fdip-grok`) running `/agent grok`
+under a codex project lost its conversation on the 2026-11-10, 2026-11-13 and
+2026-11-14 restarts, and every message afterwards started `is_resume=false`.
+
+- Fork PR: [#28](https://github.com/utensil/cc-connect/pull/28)
+  (`fix/agent-override-survives-restart`).
+
+Upstream status: fixed in this fork only; the fork's `/agent` switch is itself a
+fork feature.
+
 ### Pi turn cancellation and output policy
 
 Pi RPC prompts always carry Pi's required `streamingBehavior = "followUp"`;

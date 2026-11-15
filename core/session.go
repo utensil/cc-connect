@@ -843,26 +843,37 @@ func (sm *SessionManager) load() {
 }
 
 // InvalidateForAgent clears AgentSessionID on all sessions whose AgentType
-// does not match the current agent. This handles the case where the user
-// switches agent types (e.g. opencode → pi) and stale session IDs from the
-// old agent would cause errors.
+// does not match the agent that will serve them. This handles the case where
+// the user switches agent types (e.g. opencode → pi) and stale session IDs
+// from the old agent would cause errors.
+//
+// A session's own /agent override outranks the project default, because that
+// is the agent the next turn actually starts
+// (see Engine.effectiveAgentTypeFor). Comparing an overridden session against
+// the project default instead would wipe a live conversation — and force a
+// fresh agent session — every time the process restarts.
 func (sm *SessionManager) InvalidateForAgent(agentType string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	agentType = normalizeAgentName(agentType)
 	invalidated := 0
 	for _, s := range sm.sessions {
 		s.mu.Lock()
-		if s.AgentSessionID != "" && s.AgentType != "" && s.AgentType != agentType {
+		effectiveAgentType := agentType
+		if override := normalizeAgentName(s.AgentOverride); override != "" {
+			effectiveAgentType = override
+		}
+		if s.AgentSessionID != "" && s.AgentType != "" && s.AgentType != effectiveAgentType {
 			slog.Info("session: invalidating stale agent session",
 				"session", s.ID,
 				"old_agent", s.AgentType,
-				"new_agent", agentType,
+				"new_agent", effectiveAgentType,
 				"old_agent_session_id", s.AgentSessionID,
 			)
 			s.recordPastAgentSessionID()
 			s.AgentSessionID = ""
-			s.AgentType = agentType
+			s.AgentType = effectiveAgentType
 			invalidated++
 		}
 		s.mu.Unlock()
