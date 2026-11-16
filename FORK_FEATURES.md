@@ -205,7 +205,7 @@ missing) still falls back to the project default while the override stays set, s
 that session's id is cleared on each start — the same outcome it had before this
 change, now scoped to sessions whose id really is owned by a different agent.
 
-Observed in production: a Zulip topic (`tasks > fdip-grok`) running `/agent grok`
+Observed in production: an internal Zulip topic running `/agent grok`
 under a codex project lost its conversation on the 2026-11-10, 2026-11-13 and
 2026-11-14 restarts, and every message afterwards started `is_resume=false`.
 

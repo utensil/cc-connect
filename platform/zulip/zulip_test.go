@@ -415,7 +415,7 @@ func TestStreamingCard_ThrottlesRapidUpdates(t *testing.T) {
 
 	p := newTestPlatform(t, server.URL, nil)
 	card, err := p.CreateStreamingCard(context.Background(), replyContext{
-		kind: "stream", stream: "tasks", topic: "fdip-grok",
+		kind: "stream", stream: "tasks", topic: "demo",
 	})
 	if err != nil {
 		t.Fatalf("CreateStreamingCard() error = %v", err)
