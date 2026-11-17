@@ -1298,8 +1298,8 @@ app_secret = "your-feishu-app-secret"
 # type = "zulip"
 #
 # [projects.platforms.options]
-# url = "https://utensil.zulipchat.com"       # realm base URL / realm 地址
-# email = "kepler-bot@utensil.zulipchat.com"  # bot email / 机器人邮箱
+# url = "https://example.zulipchat.com"       # realm base URL / realm 地址
+# email = "bot@example.zulipchat.com"        # bot email / 机器人邮箱
 # api_key = "your-zulip-bot-api-key"          # bot API key / 机器人 API key
 # streams = ["tasks"]                         # stream allowlist; ["*"] = all / stream 白名单，["*"] 为全部
 # chatmode = "oncall"                         # "oncall" = only @mentions trigger a turn (default)

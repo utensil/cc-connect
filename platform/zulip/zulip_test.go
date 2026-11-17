@@ -20,7 +20,7 @@ func newTestPlatform(t *testing.T, serverURL string, opts map[string]any) *Platf
 	t.Helper()
 	o := map[string]any{
 		"url":     serverURL,
-		"email":   "kepler-bot@example.com",
+		"email":   "bot@example.com",
 		"api_key": "test-key",
 	}
 	for k, v := range opts {
@@ -66,7 +66,7 @@ func TestNew_AckOptionsOverrideDefaults(t *testing.T) {
 func TestNew_RejectsInvalidAckStyle(t *testing.T) {
 	_, err := New(map[string]any{
 		"url":       "http://127.0.0.1:1",
-		"email":     "kepler-bot@example.com",
+		"email":     "bot@example.com",
 		"api_key":   "test-key",
 		"ack_style": "embed",
 	})
@@ -90,7 +90,7 @@ func TestAcknowledgeMessage_PrivateContextUsesMessageID(t *testing.T) {
 	defer server.Close()
 
 	p := newTestPlatform(t, server.URL, nil)
-	rc := replyContext{kind: "private", dmTo: "utensil@example.com", messageID: 42}
+	rc := replyContext{kind: "private", dmTo: "tester@example.com", messageID: 42}
 	if !p.AcknowledgeMessage(rc, core.MessageAckQueued) {
 		t.Fatal("AcknowledgeMessage(queued, DM) = false, want handled")
 	}
@@ -174,7 +174,7 @@ func TestAcknowledgeMessage_PostsConfiguredReaction(t *testing.T) {
 	defer server.Close()
 
 	p := newTestPlatform(t, server.URL, nil)
-	rc := replyContext{kind: "stream", stream: "tasks", topic: "cc-connect", messageID: 625570911}
+	rc := replyContext{kind: "stream", stream: "tasks", topic: "demo", messageID: 1000001}
 
 	if !p.AcknowledgeMessage(rc, core.MessageAckSteered) {
 		t.Fatal("AcknowledgeMessage(steered) = false, want handled by reaction")
@@ -182,8 +182,8 @@ func TestAcknowledgeMessage_PostsConfiguredReaction(t *testing.T) {
 	mu.Lock()
 	gotMethod, gotPath, gotBody := method, path, body
 	mu.Unlock()
-	if gotMethod != http.MethodPost || gotPath != "/api/v1/messages/625570911/reactions" {
-		t.Fatalf("reaction request = %s %s, want POST /api/v1/messages/625570911/reactions", gotMethod, gotPath)
+	if gotMethod != http.MethodPost || gotPath != "/api/v1/messages/1000001/reactions" {
+		t.Fatalf("reaction request = %s %s, want POST /api/v1/messages/1000001/reactions", gotMethod, gotPath)
 	}
 	if !strings.Contains(gotBody, "emoji_name=compass") {
 		t.Fatalf("steered payload = %q, want emoji_name=compass", gotBody)
@@ -207,7 +207,7 @@ func TestAcknowledgeMessage_FallsBackToText(t *testing.T) {
 		http.Error(w, `{"result":"error","msg":"Emoji does not exist"}`, http.StatusBadRequest)
 	}))
 	defer server.Close()
-	rc := replyContext{kind: "stream", stream: "tasks", topic: "cc-connect", messageID: 625570911}
+	rc := replyContext{kind: "stream", stream: "tasks", topic: "demo", messageID: 1000001}
 
 	if p := newTestPlatform(t, server.URL, map[string]any{"ack_style": "message"}); p.AcknowledgeMessage(rc, core.MessageAckSteered) {
 		t.Fatal("ack_style=message must not handle the acknowledgement")
@@ -248,27 +248,27 @@ func TestProcessMessage_SetsMessageIDAndInboundReaction(t *testing.T) {
 		"streams":      []any{"tasks"},
 		"ack_reaction": "eyes",
 	})
-	p.botFullName.Store("🔭 Kepler(开开)")
+	p.botFullName.Store("Test Bot")
 
 	var got *core.Message
 	p.handler = func(_ core.Platform, m *core.Message) { got = m }
 
 	p.processMessage(context.Background(), &zulipMessage{
-		ID:               625570911,
-		SenderID:         1054187,
-		SenderEmail:      "utensil@example.com",
-		SenderFullName:   "Utensil Song",
-		Content:          "@**🔭 Kepler(开开)** ack test",
+		ID:               1000001,
+		SenderID:         1001,
+		SenderEmail:      "tester@example.com",
+		SenderFullName:   "Test User",
+		Content:          "@**Test Bot** ack test",
 		Type:             "stream",
-		Subject:          "cc-connect",
+		Subject:          "demo",
 		DisplayRecipient: json.RawMessage(`"tasks"`),
 	})
 
 	if got == nil {
 		t.Fatal("message handler was not called")
 	}
-	if got.MessageID != "625570911" {
-		t.Fatalf("core.Message.MessageID = %q, want %q", got.MessageID, "625570911")
+	if got.MessageID != "1000001" {
+		t.Fatalf("core.Message.MessageID = %q, want %q", got.MessageID, "1000001")
 	}
 	select {
 	case reaction := <-reactions:
@@ -283,11 +283,11 @@ func TestProcessMessage_SetsMessageIDAndInboundReaction(t *testing.T) {
 // A mention must be removed in every rendered form, otherwise the content does
 // not start with "/" and slash commands are dispatched to the agent as prompts.
 func TestStripBotMention(t *testing.T) {
-	const bot = "🔭 Kepler(开开)"
+	const bot = "Test Bot"
 	// The exact content Zulip delivered for the 2026-09-21 09:25 turn: the
-	// id-qualified mention form used to survive as "🔭 Kepler(开开)|1204512** …"
+	// id-qualified mention form used to survive as "Test Bot|4242** …"
 	// (53 bytes), so `/model gpt-5.6-luna max` ran as a prompt.
-	const idMention = "@**" + bot + "|1204512** /model gpt-5.6-luna max"
+	const idMention = "@**" + bot + "|4242** /model gpt-5.6-luna max"
 
 	tests := []struct {
 		name    string
@@ -298,10 +298,10 @@ func TestStripBotMention(t *testing.T) {
 		{"plain command", bot, "@**" + bot + "** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
 		{"silent command", bot, "@_**" + bot + "** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
 		{"id-qualified command", bot, idMention, "/model gpt-5.6-luna max"},
-		{"silent id-qualified command", bot, "@_**" + bot + "|1204512** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
-		{"no separator space", bot, "@**" + bot + "|1204512**/model gpt-5.6-luna", "/model gpt-5.6-luna"},
+		{"silent id-qualified command", bot, "@_**" + bot + "|4242** /model gpt-5.6-luna max", "/model gpt-5.6-luna max"},
+		{"no separator space", bot, "@**" + bot + "|4242**/model gpt-5.6-luna", "/model gpt-5.6-luna"},
 		{"mention only", bot, "@**" + bot + "**", ""},
-		{"id-qualified mention only", bot, "@**" + bot + "|1204512**", ""},
+		{"id-qualified mention only", bot, "@**" + bot + "|4242**", ""},
 		{"mid-message mention", bot, "please @**" + bot + "** run the suite", "please run the suite"},
 		{"digression after mention", bot, "@**" + bot + "**\n\nwhat changed?", "what changed?"},
 		{"other user untouched", bot, "@**Someone Else** /model gpt-5.6-luna", "@**Someone Else** /model gpt-5.6-luna"},
@@ -311,7 +311,7 @@ func TestStripBotMention(t *testing.T) {
 		{"later own mention still stripped", bot, "@**" + bot + " Extra** hi @**" + bot + "** /model x", "@**" + bot + " Extra** hi /model x"},
 		{"bare prefix before code fence untouched", bot, "```\n@**" + bot + "\n```\nand **bold** after", "```\n@**" + bot + "\n```\nand **bold** after"},
 		{"id segment without closing untouched", bot, "@**" + bot + "| and **bold**", "@**" + bot + "| and **bold**"},
-		{"later bold stays after mention", bot, "@**" + bot + "|1204512** **bold**", "**bold**"},
+		{"later bold stays after mention", bot, "@**" + bot + "|4242** **bold**", "**bold**"},
 		{"mentioned twice", bot, "@**" + bot + "** ping @**" + bot + "|7** again", "ping again"},
 		{"malformed mention untouched", bot, "@**" + bot, "@**" + bot},
 		{"empty bot name only trims", "", "  /model gpt-5.6-luna  ", "/model gpt-5.6-luna"},
@@ -328,13 +328,13 @@ func TestStripBotMention(t *testing.T) {
 // isMentioned must agree with stripBotMention about the id-qualified mention
 // form, since chatmode=oncall drops stream messages that fail this check.
 func TestIsMentioned(t *testing.T) {
-	const bot = "🔭 Kepler(开开)"
+	const bot = "Test Bot"
 	p := newTestPlatform(t, "http://127.0.0.1:1", nil)
 	p.botFullName.Store(bot)
 
 	mentioned := []string{
 		"@**" + bot + "** hello",
-		"@**" + bot + "|1204512** /model gpt-5.6-luna max",
+		"@**" + bot + "|4242** /model gpt-5.6-luna max",
 	}
 	for _, c := range mentioned {
 		if !p.isMentioned(c) {
@@ -360,8 +360,8 @@ func TestIsMentioned(t *testing.T) {
 
 // The user-visible contract, exercised through the real inbound path: a
 // mentioned slash command must reach the engine as a command. The content below
-// is byte-for-byte msg 625614213, which used to be handed to the agent as
-// "🔭 Kepler(开开)|1204512** /model gpt-5.6-luna max" (content_len=53).
+// is a byte-exact capture of the id-qualified form, which used to be handed to the agent as
+// "Test Bot|4242** /model gpt-5.6-luna max" (content_len=53).
 func TestProcessMessage_StripsIdQualifiedMentionBeforeDispatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -370,19 +370,19 @@ func TestProcessMessage_StripsIdQualifiedMentionBeforeDispatch(t *testing.T) {
 	defer server.Close()
 
 	p := newTestPlatform(t, server.URL, map[string]any{"streams": []any{"tasks"}})
-	p.botFullName.Store("🔭 Kepler(开开)")
+	p.botFullName.Store("Test Bot")
 
 	var got *core.Message
 	p.handler = func(_ core.Platform, m *core.Message) { got = m }
 
 	p.processMessage(context.Background(), &zulipMessage{
-		ID:               625614213,
-		SenderID:         1054187,
-		SenderEmail:      "utensil@example.com",
-		SenderFullName:   "Utensil Song",
-		Content:          "@**🔭 Kepler(开开)|1204512** /model gpt-5.6-luna max",
+		ID:               1000002,
+		SenderID:         1001,
+		SenderEmail:      "tester@example.com",
+		SenderFullName:   "Test User",
+		Content:          "@**Test Bot|4242** /model gpt-5.6-luna max",
 		Type:             "stream",
-		Subject:          "zulip-api",
+		Subject:          "demo",
 		DisplayRecipient: json.RawMessage(`"tasks"`),
 	})
 

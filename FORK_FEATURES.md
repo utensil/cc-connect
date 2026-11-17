@@ -6,6 +6,12 @@ differs from the real upstream,
 ledger current whenever fork-specific behavior is added, removed, or
 superseded there.
 
+Every PR that changes user-visible fork behavior must update this file in the
+same PR; see `AGENTS.md` → *Fork feature ledger* for the rule, the exemptions,
+and the post-merge record, and *Maintenance rules* below for what each entry
+must carry. This file is public — sanitise incidents here exactly as in a PR
+body (*Public-fork hygiene*).
+
 ## Branch policy
 
 - `dev` is this fork's default and product branch.
@@ -44,6 +50,30 @@ replies with `POST /messages`, edits streaming previews with `PATCH
 with `thread_isolation = true`; DMs are `zulip:dm:<email>`). `chatmode =
 "oncall"` (mention-only) is the default, `dm_policy` gates DMs, and
 `ack_reaction` reacts to each inbound message with a Zulip emoji name.
+
+Mention stripping (2026-09-21): `stripBotMention` searched for the closing `**`
+from the start of the match, so Zulip's id-qualified form `@**Name|user_id**`
+lost only its opening `@**` and left `Name|user_id**` in the content. The
+message no longer began with `/`, so a mentioned slash command was dispatched as
+a prompt and ran on the project default model. The search now anchors after the
+name, so `@**Name**`, `@_**Name**` (silent), `@**Name|id**` and `@_**Name|id**`
+all reduce to the bare content. Tests: `TestStripBotMention` and
+`TestProcessMessage_StripsIdQualifiedMentionBeforeDispatch`.
+- Merge record: [PR #15](https://github.com/utensil/cc-connect/pull/15), merged as
+  [bd0b973a](https://github.com/utensil/cc-connect/commit/bd0b973a).
+
+Streaming-card coalescing (2026-11-02): `core` drives `StreamingCard.Update`
+from every text, thinking and tool event, and `zulipStreamingCard` only skipped
+byte-identical bodies, so each streamed chunk produced a
+`PATCH /messages/{id}` — a message refreshing faster than it can be read.
+The card now throttles to one POST/PATCH per `cardUpdateMinInterval` (3 s, the
+same interval Slack uses): a skipped update is coalesced into the next tick,
+`Finalize` bypasses the throttle so the final body always lands, and identical
+bodies are still skipped before the throttle check. Tests:
+`TestStreamingCard_ThrottlesRapidUpdates` and
+`TestStreamingCard_SkipsIdenticalBodies`.
+- Merge record: [PR #24](https://github.com/utensil/cc-connect/pull/24), merged as
+  [fda65da0](https://github.com/utensil/cc-connect/commit/fda65da0).
 
 Steering and busy-message acknowledgements are delivered as **reactions**,
 matching the Discord behaviour: the platform implements
@@ -116,6 +146,32 @@ steering as unsupported. Enable `rpc = true` for any Pi agent used with
   (busy-steer fallback and CUJ coverage), currently on the feature branch.
 - Upstream status: no Pi steering implementation was found in the canonical
   repository; generic steering API work remains in competing upstream PRs.
+
+### Queued follow-ups survive a `/stop`
+
+`/stop` on a busy session answered every queued follow-up with a raw transport
+error ("session reset", one bubble per queued message), which reads like a
+crash. Two rules now hold:
+
+- **A cancelled turn keeps the queue.** On the `AgentSessionCanceller` path
+  (`/stop` → `CancelTurn`) the cancelled turn still runs its event loop, so
+  `pendingMessages` is retained and the queued follow-ups become the next turn.
+  Internal/silent stops still clear the queue.
+- **One localized line, never N error bubbles.** Every user-facing path that
+  discards queued follow-ups sends a single `MsgQueuedDiscarded` line with the
+  count ("N queued follow-up message(s) were discarded", all five languages);
+  the raw transport reason never reaches the user. A dead session re-queues the
+  message it was about to run, so the reported count is the true remainder. A
+  silent/internal stop discards the queue without a line; an empty queue sends
+  nothing.
+
+Tests: `TestStop_DiscardsQueueWithOneLocalizedNotice`,
+`TestStop_CancellableSessionKeepsQueuedFollowUps`,
+`TestStop_SilentStopStillClearsQueue`.
+- Merge record: [PR #21](https://github.com/utensil/cc-connect/pull/21), merged as
+  [f45ccf6d](https://github.com/utensil/cc-connect/commit/f45ccf6d).
+- See also: *A failed `/stop` cancel must not double-unlock `interactiveMu`*
+  below — the other defect in `stopInteractiveSessionWithOptions`.
 
 ### A failed `/stop` cancel must not double-unlock `interactiveMu`
 

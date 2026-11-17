@@ -198,8 +198,8 @@ A CUJ test is a USER-perspective end-to-end scenario, not a developer-
 perspective unit test. The current inventory of CUJs and their coverage
 status lives in:
 
-`projects/cc-connect/agents/qa-cursor/release-gate/CUJ-INVENTORY.md`
-(in the spaceship agency workspace; the registered authoritative copy).
+`CUJ-INVENTORY.md` in the internal QA workspace (the registered authoritative
+copy; it is not kept in this repository and must not be linked from here).
 
 Rules for adding/updating CUJ tests in `core/cuj_test.go`:
 
@@ -246,6 +246,70 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_copilot`, `no_cursor`
 `no_discord`, `no_slack`, `no_dingtalk`, `no_wecom`, `no_weixin`, `no_qq`, `no_qqbot`,
 `no_line`, `no_weibo`.
 
+## Public-fork hygiene
+
+This repository is public ([`utensil/cc-connect`](https://github.com/utensil/cc-connect),
+a fork of `chenhg5/cc-connect`). Everything written here is world-readable
+forever: PR titles and bodies, issue bodies, review and issue comments, commit
+messages (**including the squash-merge message GitHub generates from the PR**),
+branch names, file names, file contents, test fixtures, committed images and
+screenshots, CHANGELOG and release notes, and CI logs.
+
+Treat identifiers taken from real deployments as private, not just credentials:
+
+| Category | Never publish | Publish instead |
+| --- | --- | --- |
+| Credentials | API keys, bot tokens, `*.env` contents, auth files | nothing, ever |
+| Account identity | bot emails (`*-bot@…`), realm/host URLs, bot display names, personal emails | "the bot account", "an internal Zulip realm" |
+| Channels and topics | `channel > topic`, `zulip:stream:<stream>:<topic>`, DM addresses | "an internal Zulip topic", "a DM" |
+| Session identifiers | agent session ids and their prefixes (`01a2b3c4`), cc-connect session labels (`s123`), message ids | `<session-id>`, `<message-id>` |
+| Platform ids | Discord guild/channel/user/message ids, DingTalk/Feishu ids seen in production | synthetic values or `<id>` |
+| Host paths | `/Users/<name>/…`, a person's own dirs under `~/` (`~/projects/…`), a deployment's env or credential file (`<env-dir>/<account>.env`) | `t.TempDir()`, `/path/to/workdir`, `<env-file>` (the product's own documented defaults, e.g. `~/.cc-connect/config.toml`, are fine) |
+| Devices and network | tailnet addresses, device hostnames, internal service ports | "the host", "the service" |
+| Internal projects | unpublished project or workspace names, private repository names, plan titles | "an internal project" |
+
+Rules:
+
+- **Keep the evidence, drop the identifier.**
+  `session: invalidating stale agent session session=<id> old_agent=grok new_agent=codex`
+  is as convincing as the original log line.
+- **A synthetic-looking value is not safe.** Rollout files
+  (`rollout-…-<uuid>.jsonl`), `session=…` labels, rendered mentions
+  (`@**Name|1234567**`) and quoted message ids all carry deployment
+  identifiers.
+- **Scrub before pushing, not after.** A later redaction commit leaves the
+  original in the diff, in every clone, and in the squash-merge message.
+- **Squash-merge messages come from the PR title and body.** Fix the source;
+  do not hand-edit a merge commit on `dev` to repair a leak — that rewrites
+  public history and breaks every recorded SHA.
+- **Fixtures use synthetic values** (`t.TempDir()`, `"demo"`, `"1234567890"`),
+  never production ids.
+- **If a leak is already on `dev`**, correct the text in the next PR (a one-line
+  scrub commit only when a live secret is exposed) and record the residue —
+  including immutable history you chose not to rewrite — in that PR.
+
+## Fork feature ledger
+
+`FORK_FEATURES.md` is the fork's ledger and has no upstream counterpart. A PR
+that changes user-visible fork behavior **must update it in the same PR**:
+
+- New behavior → add an `###` entry: what changed, why it was missing or broke,
+  the tests that pin it, any residual risk, and the PR/merge reference. If the
+  behavior extends an accumulating section (Zulip, Grok, Pi, session-scoped
+  switching), add a dated paragraph there instead — those sections collect one
+  change per paragraph by design.
+- Changed behavior → replace the superseded paragraph and say in one line what
+  it replaced, so the file keeps the record of when behavior changed.
+- Exempt: pure chores, refactors with no behavior change, documentation-only
+  changes, and test-only changes. Say so in the PR body
+  (`no ledger change: chore|refactor|docs|test`) so the omission is visible
+  rather than assumed.
+- After merge, a small docs commit on `dev` links the merge commit, following
+  the entries that carry `- Fork PR:` and `- Merge record:` lines.
+
+Both files are public: sanitise an incident in the ledger exactly as in a PR
+body (see *Public-fork hygiene*).
+
 ## Pre-Commit Checklist
 
 1. **Build passes**: `go build ./...`
@@ -255,6 +319,8 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_copilot`, `no_cursor`
 5. **No new hardcoded platform/agent names in core**: grep for platform names in `core/*.go`.
 6. **i18n complete**: all new user-facing strings have translations for all languages.
 7. **No secrets in code**: no API keys, tokens, or credentials in source files.
+8. **No private identifiers** (see *Public-fork hygiene*): title, body, comments, commit message, and any fixture you add or modify are free of private host paths, bot/realm identities, channel and topic names, session and message ids, and platform ids.
+9. **Fork ledger updated** (`FORK_FEATURES.md`) when this PR changes user-visible fork behavior, or the PR body states why it is exempt.
 
 ## Adding a New Platform
 
